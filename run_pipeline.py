@@ -11,6 +11,7 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 from analytics.utils.evaluation_report import run_comprehensive_evaluation
+from analytics.models.demand_forecaster import DemandForecaster
 
 # Import simulation components
 from simulation.config import DEFAULT_CONFIG
@@ -98,7 +99,13 @@ def run_analytics(transaction_data, inventory_data, demand_data, output_dir, for
     
     # Train demand forecasting model
     print("\nTraining demand forecasting model using " + model_type + "...")
+    
+
+
+    # Initialize with new parameters
     demand_forecaster = DemandForecaster(model_type=model_type)
+    demand_forecaster.sequence_length = 14  # Adjust as needed
+    demand_forecaster.use_ensemble = True  # Set to False if not using ensemble
     try:
         demand_forecaster.fit(demand_data)
         

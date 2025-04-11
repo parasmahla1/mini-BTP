@@ -1,552 +1,630 @@
+#!/usr/bin/env python3
 """
-Enhanced demand forecasting using 1D CNN with LSTM architecture
-for superior supply chain predictive analytics.
+Supply Chain Simulation and Predictive Analytics Pipeline.
+Enhanced version with advanced 1D CNN-LSTM models.
 """
+
+import os
+import time
+import argparse
+from datetime import datetime
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
-from sklearn.model_selection import train_test_split
-import xgboost as xgb
-import tensorflow as tf
-from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import Input, Dense, LSTM, Conv1D, MaxPooling1D
-from tensorflow.keras.layers import Flatten, Dropout, BatchNormalization, Add
-from tensorflow.keras.layers import Bidirectional, GRU, Concatenate, LeakyReLU
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.regularizers import l1_l2
-import os
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Suppress TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# Import simulation modules
+from simulation.supply_chain_simulator import SupplyChainSimulator
+from simulation.config import DEFAULT_CONFIG
 
-class DemandForecaster:
-    """Advanced forecaster using 1D CNN + LSTM architecture optimized for supply chain data."""
+# Import analytics modules
+from analytics.models.demand_forecaster import DemandForecaster
+from analytics.models.disruption_predictor import DisruptionPredictor
+from analytics.models.lead_time_predictor import LeadTimePredictor
+from analytics.models.inventory_optimizer import InventoryOptimizer
+from analytics.utils.evaluation_report import (
+    run_comprehensive_evaluation,
+    evaluate_forecast_accuracy,
+    evaluate_disruption_predictions,
+    evaluate_lead_time_accuracy,
+    evaluate_inventory_policy
+)
+
+# Configure logging
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def setup_directories():
+    """Setup output directories."""
+    # Create output directories
+    sim_output_dir = os.path.join(os.getcwd(), 'output', 'simulation')
+    analytics_output_dir = os.path.join(os.getcwd(), 'output', 'analytics')
     
-    def __init__(self, model_type='cnn_lstm'):
-        """
-        Initialize enhanced demand forecaster.
-        
-        Args:
-            model_type (str): Model type - 'cnn_lstm', 'xgboost' or 'random_forest'
-        """
-        self.model_type = model_type
-        self.models = {}  # Store models by product-retailer pairs
-        self.scalers = {}  # Store scalers for each model
-        self.feature_scalers = {}  # Store feature-specific scalers
-        self.sequence_length = 14  # Number of time steps for sequence input
-        self.feature_sequences = {}  # Store feature sequences for prediction
-        self.feature_importance = {}  # Store feature importance for each model
-        
-        # Advanced CNN-LSTM settings
-        self.learning_rate = 1e-3
-        self.batch_size = 16
-        self.epochs = 100
-        self.patience = 10
-        self.validation_split = 0.2
-        
-        # Ensure TensorFlow uses memory efficiently
-        self._configure_tensorflow()
-        
-    def _configure_tensorflow(self):
-        """Configure TensorFlow for optimal performance."""
-        # Memory growth settings
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            try:
-                for gpu in gpus:
-                    tf.config.experimental.set_memory_growth(gpu, True)
-            except RuntimeError as e:
-                print(f"Memory growth setting error: {e}")
-                
-        # Set computation precision - mixed precision for faster training on GPUs
-        tf.keras.mixed_precision.set_global_policy('mixed_float16')
-        
-    def prepare_features(self, data):
-        """Create advanced features for demand forecasting."""
-        df = data.copy()
-        
-        # Convert date to datetime if it's not
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'])
-        
-        # Sort by date
-        df = df.sort_values('date')
-        
-        # Time-based features
-        df['day_of_week'] = df['date'].dt.dayofweek
-        df['day_of_month'] = df['date'].dt.day
-        df['month'] = df['date'].dt.month
-        df['quarter'] = df['date'].dt.quarter
-        df['week_of_year'] = df['date'].dt.isocalendar().week
-        df['is_weekend'] = df['day_of_week'].apply(lambda x: 1 if x >= 5 else 0)
-        df['is_month_start'] = df['date'].dt.is_month_start.astype(int)
-        df['is_month_end'] = df['date'].dt.is_month_end.astype(int)
-        
-        # Cyclical encoding of time features (improved representation)
-        df['day_of_week_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
-        df['day_of_week_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
-        df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-        df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
-        df['day_of_month_sin'] = np.sin(2 * np.pi * df['day_of_month'] / 31)
-        df['day_of_month_cos'] = np.cos(2 * np.pi * df['day_of_month'] / 31)
-        
-        # Create lag features for demand with more granularity
-        for lag in [1, 2, 3, 5, 7, 10, 14, 21, 28]:
-            df[f'demand_lag_{lag}'] = df.groupby(['product_id', 'retailer_id'])['demand'].shift(lag)
-        
-        # Enhanced rolling statistics
-        for window in [7, 14, 21, 28]:
-            # Standard rolling statistics
-            df[f'demand_roll_mean_{window}'] = df.groupby(['product_id', 'retailer_id'])['demand'].transform(
-                lambda x: x.rolling(window=window, min_periods=1).mean())
-            df[f'demand_roll_std_{window}'] = df.groupby(['product_id', 'retailer_id'])['demand'].transform(
-                lambda x: x.rolling(window=window, min_periods=1).std().fillna(0))
-            
-            # Advanced rolling statistics
-            df[f'demand_roll_median_{window}'] = df.groupby(['product_id', 'retailer_id'])['demand'].transform(
-                lambda x: x.rolling(window=window, min_periods=1).median())
-            df[f'demand_roll_max_{window}'] = df.groupby(['product_id', 'retailer_id'])['demand'].transform(
-                lambda x: x.rolling(window=window, min_periods=1).max())
-            df[f'demand_roll_min_{window}'] = df.groupby(['product_id', 'retailer_id'])['demand'].transform(
-                lambda x: x.rolling(window=window, min_periods=1).min())
-            
-        # Calculate trend indicators
-        df['demand_diff'] = df.groupby(['product_id', 'retailer_id'])['demand'].diff()
-        df['demand_diff_pct'] = df.groupby(['product_id', 'retailer_id'])['demand'].pct_change()
-        
-        # Calculate moving averages with different windows for trend analysis
-        df['demand_ewm_7'] = df.groupby(['product_id', 'retailer_id'])['demand'].transform(
-            lambda x: x.ewm(span=7, min_periods=1).mean())
-        df['demand_ewm_14'] = df.groupby(['product_id', 'retailer_id'])['demand'].transform(
-            lambda x: x.ewm(span=14, min_periods=1).mean())
-        
-        # Calculate moving average ratios for trend strength
-        df['demand_ma_ratio_7_14'] = df['demand_roll_mean_7'] / df['demand_roll_mean_14']
-        
-        # Fill NaN values with appropriate methods
-        for col in df.columns:
-            if df[col].isna().any():
-                if col.startswith('demand_diff'):
-                    df[col] = df[col].fillna(0)
-                elif col.startswith('demand_ma_ratio'):
-                    df[col] = df[col].fillna(1)
-                else:
-                    df[col] = df[col].fillna(df[col].mean())
-        
-        return df
+    os.makedirs(sim_output_dir, exist_ok=True)
+    os.makedirs(analytics_output_dir, exist_ok=True)
     
-    def create_sequences(self, data, target_col='demand'):
-        """
-        Convert time series data to sequences for CNN-LSTM input.
-        Enhanced with overlapping sequences for more training data.
-        
-        Args:
-            data (pd.DataFrame): Input time series data
-            target_col (str): Target column to predict
-            
-        Returns:
-            tuple: (X_sequences, y_values) for model training
-        """
-        sequences = []
-        targets = []
-        
-        # Create sequences with step=1 for maximum data utilization
-        for i in range(len(data) - self.sequence_length):
-            # Get sequence and corresponding target
-            sequence = data.iloc[i:i+self.sequence_length]
-            target = data.iloc[i+self.sequence_length][target_col]
-            
-            sequences.append(sequence.values)
-            targets.append(target)
-        
-        return np.array(sequences), np.array(targets)
+    return sim_output_dir, analytics_output_dir
+
+def run_simulation(config, output_dir):
+    """Run supply chain simulation."""
+    print("\n" + "="*80)
+    print("Running Supply Chain Simulation".center(80))
+    print("="*80)
     
-    def build_enhanced_cnn_lstm_model(self, input_shape):
-        """
-        Build an enhanced 1D CNN + LSTM hybrid model with residual connections
-        and attention mechanisms for better time series processing.
-        
-        Args:
-            input_shape (tuple): Shape of input sequences (timesteps, features)
+    start_time = time.time()
+    
+    # Initialize simulator
+    simulator = SupplyChainSimulator(config)
+    
+    # Run simulation
+    simulator.run()
+    
+    # Get simulation results
+    transaction_df = simulator.get_transaction_data()
+    inventory_df = simulator.get_inventory_data()
+    demand_df = simulator.get_demand_data()
+    
+    elapsed_time = time.time() - start_time
+    print(f"\nSimulation completed in {elapsed_time:.2f} seconds.")
+    
+    # Save results
+    transaction_df.to_csv(os.path.join(output_dir, 'transactions.csv'), index=False)
+    inventory_df.to_csv(os.path.join(output_dir, 'inventory.csv'), index=False)
+    demand_df.to_csv(os.path.join(output_dir, 'demand.csv'), index=False)
+    
+    # Additional simulation data
+    disruptions_df = simulator.get_disruption_data()
+    if disruptions_df is not None:
+        disruptions_df.to_csv(os.path.join(output_dir, 'disruptions.csv'), index=False)
+    
+    lead_times_df = simulator.get_lead_time_data()
+    if lead_times_df is not None:
+        lead_times_df.to_csv(os.path.join(output_dir, 'lead_times.csv'), index=False)
+    
+    print(f"Saved simulation data to {output_dir}")
+    
+    return transaction_df, inventory_df, demand_df
+
+def run_analytics(transaction_data, inventory_data, demand_data, output_dir, 
+                 forecast_days=30, model_type='cnn_lstm', external_data=None):
+    """
+    Run the predictive analytics on simulation data.
+    
+    Args:
+        transaction_data (pd.DataFrame): Transaction data
+        inventory_data (pd.DataFrame): Inventory data
+        demand_data (pd.DataFrame): Demand data
+        output_dir (str): Output directory
+        forecast_days (int): Number of days to forecast
+        model_type (str): Model type - 'cnn_lstm', 'xgboost' or 'random_forest'
+        external_data (pd.DataFrame): Optional external data for enhanced features
+    """
+    print("\n" + "="*80)
+    print("Running Predictive Analytics Pipeline".center(80))
+    print("="*80)
+    
+    start_time = time.time()
+    
+    # Get unique retailer and product IDs
+    retailers = demand_data['retailer_id'].unique()
+    products = demand_data['product_id'].unique()
+    
+    print(f"\nAnalyzing {len(retailers)} retailers and {len(products)} products.")
+    
+    # Create sample subset for development/debugging
+    sample_retailers = retailers[:min(5, len(retailers))]
+    sample_products = products[:min(5, len(products))]
+    
+    # Step 1: Demand Forecasting
+    # -------------------------
+    print("\n1. Running Demand Forecasting\n" + "-"*50)
+    print(f"Using {model_type} model for demand forecasting")
+    
+    # Initialize and configure demand forecaster
+    demand_forecaster = DemandForecaster(model_type=model_type)
+    
+    # Set advanced model parameters if using CNN-LSTM
+    if model_type == 'cnn_lstm':
+        # Configure CNN-LSTM settings based on data size
+        if len(demand_data) < 5000:  # Small dataset
+            demand_forecaster.sequence_length = 10
+            demand_forecaster.batch_size = 8
+            demand_forecaster.epochs = 50
+        elif len(demand_data) < 20000:  # Medium dataset
+            demand_forecaster.sequence_length = 14
+            demand_forecaster.batch_size = 16
+            demand_forecaster.epochs = 100
+        else:  # Large dataset
+            demand_forecaster.sequence_length = 21
+            demand_forecaster.batch_size = 32
+            demand_forecaster.epochs = 150
             
-        Returns:
-            tf.keras.Model: Compiled CNN-LSTM model
-        """
-        # Input layer
-        inputs = Input(shape=input_shape)
+        # Enable ensemble if enough data
+        demand_forecaster.use_ensemble = len(demand_data) >= 10000
         
-        # First CNN block with residual connection
-        cnn1 = Conv1D(filters=64, kernel_size=3, padding='same', activation=None)(inputs)
-        cnn1 = BatchNormalization()(cnn1)
-        cnn1 = LeakyReLU(alpha=0.2)(cnn1)
-        cnn1 = MaxPooling1D(pool_size=2)(cnn1)
-        
-        # Second CNN block with residual connection
-        cnn2 = Conv1D(filters=128, kernel_size=3, padding='same', activation=None)(cnn1)
-        cnn2 = BatchNormalization()(cnn2)
-        cnn2 = LeakyReLU(alpha=0.2)(cnn2)
-        cnn2 = MaxPooling1D(pool_size=2)(cnn2)
-        
-        # Third CNN block with increased filters
-        cnn3 = Conv1D(filters=256, kernel_size=3, padding='same', activation=None)(cnn2)
-        cnn3 = BatchNormalization()(cnn3)
-        cnn3 = LeakyReLU(alpha=0.2)(cnn3)
-        cnn3 = Dropout(0.3)(cnn3)
-        
-        # Bidirectional LSTM for better temporal feature extraction
-        lstm1 = Bidirectional(LSTM(128, return_sequences=True))(cnn3)
-        lstm1 = Dropout(0.3)(lstm1)
-        
-        # Second LSTM layer
-        lstm2 = LSTM(64)(lstm1)
-        
-        # Fully connected layers
-        dense1 = Dense(32, activation='relu', kernel_regularizer=l1_l2(l1=1e-5, l2=1e-4))(lstm2)
-        dense1 = BatchNormalization()(dense1)
-        dense1 = Dropout(0.2)(dense1)
-        
-        # Output layer
-        output = Dense(1)(dense1)
-        
-        # Create model
-        model = Model(inputs=inputs, outputs=output)
-        
-        # Use Adam optimizer with learning rate schedule
-        optimizer = Adam(learning_rate=self.learning_rate)
-        
-        # Compile model
-        model.compile(
-            optimizer=optimizer, 
-            loss='huber_loss',  # More robust to outliers than MSE
-            metrics=['mae', 'mse']
+        print(f"CNN-LSTM configured with sequence_length={demand_forecaster.sequence_length}, " +
+              f"batch_size={demand_forecaster.batch_size}, epochs={demand_forecaster.epochs}")
+        if demand_forecaster.use_ensemble:
+            print("Using model ensemble for improved accuracy")
+    
+    # Check for external data
+    if external_data is not None:
+        print("Using external indicators for enhanced forecasting")
+        demand_forecaster.use_external_indicators = True
+    
+    # Train demand forecasting model
+    print("\nTraining demand forecasting model...")
+    demand_forecaster.fit(demand_data, external_data)
+    
+    # Generate forecasts
+    forecast_demand = demand_forecaster.predict(
+        demand_data, 
+        periods_ahead=forecast_days,
+        external_data=external_data
+    )
+    
+    # Save forecasts
+    forecast_demand.to_csv(os.path.join(output_dir, 'demand_forecast.csv'), index=False)
+    print(f"Saved demand forecasts for {len(forecast_demand)} product-retailer combinations")
+    
+    # Step 2: Disruption Prediction
+    # ----------------------------
+    print("\n2. Running Disruption Prediction\n" + "-"*50)
+    
+    # Combine inventory and demand data to create disruption indicators
+    if 'stockout' not in inventory_data.columns:
+        print("Creating stockout indicators from inventory and demand data")
+        # Create a dataframe with combined inventory and demand data
+        combined_data = pd.merge(
+            inventory_data,
+            demand_data,
+            left_on=['date', 'entity_id', 'item_id'],
+            right_on=['date', 'retailer_id', 'product_id'],
+            how='inner'
         )
         
-        return model
-    
-    def fit(self, data):
-        """Train advanced forecasting models for each product-retailer combination."""
-        # Prepare features
-        df = self.prepare_features(data)
+        # Identify stockouts (demand exceeds inventory)
+        combined_data['stockout'] = (combined_data['inventory_level'] < combined_data['demand']).astype(int)
         
-        # Group by product and retailer
-        for (product_id, retailer_id), group in df.groupby(['product_id', 'retailer_id']):
-            print(f"Training model for product {product_id}, retailer {retailer_id}")
-            
-            # Skip if very little data (need at least 2*sequence_length for training)
-            if len(group) < 2 * self.sequence_length:
-                print(f"  Skipping due to insufficient data: {len(group)} records")
-                continue
-            
-            # Sort by date
-            group = group.sort_values('date')
-            
-            # Define features and target
-            feature_cols = [col for col in group.columns if col not in 
-                           ['date', 'product_id', 'retailer_id', 'demand', 
-                            'fulfilled', 'stockout', 'stockout_rate']]
-            
-            # Store the last sequence for prediction
-            if len(group) >= self.sequence_length:
-                self.feature_sequences[(product_id, retailer_id)] = group[feature_cols + ['demand']].iloc[-self.sequence_length:].copy()
-            
-            # For CNN-LSTM model
-            if self.model_type == 'cnn_lstm':
-                # Scale features
-                scaler = RobustScaler()  # More robust to outliers than StandardScaler
-                X = group[feature_cols].values
-                X_scaled = scaler.fit_transform(X)
-                
-                # Store scaler for future use
-                self.scalers[(product_id, retailer_id)] = scaler
-                
-                # Replace original values with scaled values
-                scaled_group = group.copy()
-                scaled_group[feature_cols] = X_scaled
-                
-                # Create sequences
-                X_seq, y_seq = self.create_sequences(scaled_group[feature_cols + ['demand']])
-                
-                # Split data
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X_seq, y_seq, test_size=self.validation_split, random_state=42, shuffle=False
-                )
-                
-                # Build enhanced CNN-LSTM model
-                input_shape = (X_train.shape[1], X_train.shape[2])
-                model = self.build_enhanced_cnn_lstm_model(input_shape)
-                
-                # Print model summary for first instance only
-                if len(self.models) == 0:
-                    model.summary()
-                
-                # Create callbacks
-                early_stopping = EarlyStopping(
-                    monitor='val_loss',
-                    patience=self.patience,
-                    restore_best_weights=True,
-                    verbose=1
-                )
-                
-                reduce_lr = ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.2,
-                    patience=5,
-                    min_lr=1e-6,
-                    verbose=1
-                )
-                
-                try:
-                    # Train model with progress display
-                    print(f"  Training CNN-LSTM model with {len(X_train)} sequences...")
-                    history = model.fit(
-                        X_train, y_train,
-                        validation_data=(X_val, y_val),
-                        epochs=self.epochs,
-                        batch_size=self.batch_size,
-                        callbacks=[early_stopping, reduce_lr],
-                        verbose=0  # Set to 1 for progress display
-                    )
-                    
-                    # Store the model
-                    self.models[(product_id, retailer_id)] = model
-                    
-                    # Print validation performance
-                    val_loss = model.evaluate(X_val, y_val, verbose=0)
-                    print(f"  Validation MAE: {val_loss[1]:.2f}, MSE: {val_loss[2]:.2f}")
-                    
-                    # Check for overfitting
-                    train_loss = model.evaluate(X_train, y_train, verbose=0)
-                    if train_loss[1] < 0.5 * val_loss[1]:
-                        print("  Warning: Possible overfitting detected")
-                    
-                except Exception as e:
-                    print(f"  Error training CNN-LSTM model: {e}")
-                    print("  Falling back to XGBoost model")
-                    
-                    # Train XGBoost as fallback
-                    X = group[feature_cols]
-                    y = group['demand']
-                    
-                    # Rescale features for XGBoost
-                    scaler = StandardScaler()
-                    X_scaled = scaler.fit_transform(X)
-                    self.scalers[(product_id, retailer_id)] = scaler
-                    
-                    model = xgb.XGBRegressor(
-                        n_estimators=200,
-                        learning_rate=0.05,
-                        max_depth=7,
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        random_state=42
-                    )
-                    model.fit(X_scaled, y)
-                    self.models[(product_id, retailer_id)] = model
-                    
-                    # Store feature importance
-                    if hasattr(model, 'feature_importances_'):
-                        feature_importance = pd.DataFrame({
-                            'Feature': feature_cols,
-                            'Importance': model.feature_importances_
-                        }).sort_values('Importance', ascending=False)
-                        self.feature_importance[(product_id, retailer_id)] = feature_importance
-                    
-            # For traditional ML models (XGBoost as fallback)
+        # Summarize stockouts by retailer, product, and date
+        disruption_data = combined_data.groupby(['retailer_id', 'product_id', 'date']).agg(
+            {'stockout': 'max'}
+        ).reset_index()
+    else:
+        # Use existing stockout indicators
+        disruption_data = inventory_data[
+            ['entity_id', 'item_id', 'date', 'stockout']
+        ].rename(columns={'entity_id': 'retailer_id', 'item_id': 'product_id'})
+    
+    # Train disruption predictor model
+    disruption_predictor = DisruptionPredictor()
+    disruption_predictor.fit(disruption_data, demand_data)
+    
+    # Generate predictions
+    disruption_preds = disruption_predictor.predict(disruption_data, demand_data)
+    
+    # Save predictions
+    disruption_preds.to_csv(os.path.join(output_dir, 'disruption_predictions.csv'), index=False)
+    print(f"Saved disruption predictions for {len(disruption_preds)} product-retailer combinations")
+    
+    # Step 3: Lead Time Prediction
+    # ---------------------------
+    print("\n3. Running Lead Time Prediction\n" + "-"*50)
+    
+    # Extract lead time data from transactions
+    if 'lead_time' not in transaction_data.columns:
+        print("Calculating lead times from transaction data")
+        # Group transactions by order ID and calculate lead time
+        order_times = transaction_data.groupby('order_id').agg({
+            'date': ['min', 'max'],
+            'from_entity_id': 'first',
+            'to_entity_id': 'first',
+            'item_id': 'first'
+        })
+        
+        # Flatten the MultiIndex columns
+        order_times.columns = ['_'.join(col).strip() for col in order_times.columns.values]
+        
+        # Calculate lead time in days
+        order_times['lead_time'] = (
+            pd.to_datetime(order_times['date_max']) - 
+            pd.to_datetime(order_times['date_min'])
+        ).dt.days
+        
+        # Create lead times dataframe
+        lead_times = order_times[[
+            'from_entity_id', 'to_entity_id', 'item_id', 'lead_time'
+        ]].rename(columns={
+            'from_entity_id': 'supplier_id',
+            'to_entity_id': 'buyer_id',
+            'item_id': 'product_id'
+        })
+        
+        # Add date
+        lead_times['date'] = pd.to_datetime(order_times['date_max'])
+    else:
+        # Use existing lead time data
+        lead_times = transaction_data[
+            ['from_entity_id', 'to_entity_id', 'item_id', 'date', 'lead_time']
+        ].rename(columns={
+            'from_entity_id': 'supplier_id',
+            'to_entity_id': 'buyer_id',
+            'item_id': 'product_id'
+        })
+    
+    # Save lead times
+    lead_times.to_csv(os.path.join(output_dir, 'lead_times.csv'), index=False)
+    
+    # Generate samples for lead time prediction model
+    lead_time_predictor = LeadTimePredictor()
+    lead_time_predictor.fit(lead_times, transaction_data)
+    
+    # Generate predictions for sample test cases
+    sample_lead_times = lead_time_predictor.create_test_samples(lead_times)
+    lead_time_predictions = lead_time_predictor.predict(sample_lead_times)
+    
+    # Save lead time predictions
+    lead_time_predictions.to_csv(os.path.join(output_dir, 'lead_time_predictions_sample.csv'), index=False)
+    print(f"Saved lead time predictions for {len(lead_time_predictions)} supplier-buyer-product combinations")
+    
+    # Step 4: Inventory Optimization
+    # ----------------------------
+    print("\n4. Running Inventory Optimization\n" + "-"*50)
+    
+    # Create inventory optimizer
+    inventory_optimizer = InventoryOptimizer()
+    
+    # Generate optimized inventory policies
+    inventory_policies = inventory_optimizer.optimize(
+        inventory_data, 
+        demand_data, 
+        forecast_demand,
+        lead_times
+    )
+    
+    # Save inventory policies
+    inventory_policies.to_csv(os.path.join(output_dir, 'inventory_policies.csv'), index=False)
+    print(f"Saved inventory policies for {len(inventory_policies)} product-retailer combinations")
+    
+    # Step 5: Generate Visualizations
+    # -----------------------------
+    print("\n5. Generating Visualizations\n" + "-"*50)
+    
+    # Create visualization directory
+    viz_dir = os.path.join(output_dir, 'visualizations')
+    os.makedirs(viz_dir, exist_ok=True)
+    
+    # Visualization 1: Demand Forecast vs Actual for a sample product-retailer
+    try:
+        sample_product = forecast_demand['product_id'].iloc[0]
+        sample_retailer = forecast_demand['retailer_id'].iloc[0]
+        
+        # Get historical data
+        historical = demand_data[
+            (demand_data['product_id'] == sample_product) & 
+            (demand_data['retailer_id'] == sample_retailer)
+        ].sort_values('date')
+        
+        # Get forecast data
+        forecast = forecast_demand[
+            (forecast_demand['product_id'] == sample_product) & 
+            (forecast_demand['retailer_id'] == sample_retailer)
+        ].sort_values('date')
+        
+        # Create plot
+        plt.figure(figsize=(12, 6))
+        
+        # Plot historical data
+        plt.plot(
+            pd.to_datetime(historical['date']), 
+            historical['demand'], 
+            'b-', 
+            label='Historical Demand'
+        )
+        
+        # Plot forecast
+        plt.plot(
+            pd.to_datetime(forecast['date']),
+            forecast['forecasted_demand'],
+            'r--',
+            label='Forecast'
+        )
+        
+        plt.title(f'Demand Forecast for Product {sample_product} at Retailer {sample_retailer}')
+        plt.xlabel('Date')
+        plt.ylabel('Demand')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        # Save figure
+        plt.savefig(os.path.join(viz_dir, 'demand_forecast_sample.png'))
+        plt.close()
+        
+        print("Created demand forecast visualization")
+    except Exception as e:
+        print(f"Error creating demand forecast visualization: {e}")
+    
+    # Visualization 2: Disruption probability heatmap
+    try:
+        # Create a pivot table of disruption probabilities
+        pivot_data = disruption_preds.pivot_table(
+            index='product_id',
+            columns='retailer_id',
+            values='disruption_probability',
+            aggfunc='mean'
+        )
+        
+        # Create heatmap
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            pivot_data,
+            cmap='YlOrRd',
+            annot=False,
+            fmt='.2f',
+            linewidths=0.5
+        )
+        
+        plt.title('Disruption Probability by Product and Retailer')
+        plt.tight_layout()
+        
+        # Save figure
+        plt.savefig(os.path.join(viz_dir, 'disruption_heatmap.png'))
+        plt.close()
+        
+        print("Created disruption probability heatmap")
+    except Exception as e:
+        print(f"Error creating disruption heatmap: {e}")
+    
+    elapsed_time = time.time() - start_time
+    print(f"\nAnalytics completed in {elapsed_time:.2f} seconds.")
+    print(f"Results saved to {output_dir}")
+
+def run_evaluation(sim_output_dir, analytics_output_dir):
+    """Run evaluation of analytics results against simulation data."""
+    print("\n" + "="*80)
+    print("Starting Evaluation of Prediction Accuracy".center(80))
+    print("="*80)
+    
+    start_time = time.time()
+    
+    # Create output directory for evaluation results
+    eval_output_dir = os.path.join(analytics_output_dir, 'evaluation')
+    os.makedirs(eval_output_dir, exist_ok=True)
+    
+    # Create visualization directory
+    viz_dir = os.path.join(eval_output_dir, 'visualizations')
+    os.makedirs(viz_dir, exist_ok=True)
+    
+    try:
+        # Load data files
+        print("\nLoading data files for evaluation...")
+        
+        # Simulation data (ground truth)
+        actual_demand = pd.read_csv(os.path.join(sim_output_dir, 'demand.csv'))
+        inventory_data = pd.read_csv(os.path.join(sim_output_dir, 'inventory.csv'))
+        
+        try:
+            lead_times = pd.read_csv(os.path.join(sim_output_dir, 'lead_times.csv'))
+        except:
+            lead_times = pd.read_csv(os.path.join(analytics_output_dir, 'lead_times.csv'))
+        
+        # Analytics results
+        forecast_demand = pd.read_csv(os.path.join(analytics_output_dir, 'demand_forecast.csv'))
+        disruption_preds = pd.read_csv(os.path.join(analytics_output_dir, 'disruption_predictions.csv'))
+        lead_time_preds = pd.read_csv(os.path.join(analytics_output_dir, 'lead_time_predictions_sample.csv'))
+        inventory_policies = pd.read_csv(os.path.join(analytics_output_dir, 'inventory_policies.csv'))
+        
+        # Run evaluations
+        results = {}
+        
+        # 1. Evaluate demand forecasts
+        print("\nEvaluating demand forecast accuracy...")
+        forecast_results = evaluate_forecast_accuracy(
+            actual_demand, forecast_demand, viz_dir
+        )
+        results['demand_forecast'] = forecast_results
+        
+        # 2. Evaluate disruption predictions
+        print("\nEvaluating disruption prediction accuracy...")
+        # Create disruption column in inventory data if it doesn't exist
+        if 'disruption' not in inventory_data.columns:
+            # Define disruption as inventory level = 0 for products
+            if 'item_type' in inventory_data.columns:
+                inventory_data['disruption'] = (
+                    (inventory_data['inventory_level'] == 0) & 
+                    (inventory_data['item_type'] == 'product')
+                ).astype(int)
             else:
-                X = group[feature_cols]
-                y = group['demand']
-                
-                # Scale features
-                scaler = StandardScaler()
-                X_scaled = scaler.fit_transform(X)
-                
-                # Save scaler
-                self.scalers[(product_id, retailer_id)] = scaler
-                
-                # Train model
-                if self.model_type == 'xgboost':
-                    model = xgb.XGBRegressor(
-                        n_estimators=200,
-                        learning_rate=0.05,
-                        max_depth=9,
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        random_state=42,
-                        n_jobs=-1
-                    )
-                    model.fit(X_scaled, y)
-                
-                # Store the model
-                self.models[(product_id, retailer_id)] = model
-                
-                # Store feature importance
-                if hasattr(model, 'feature_importances_'):
-                    feature_importance = pd.DataFrame({
-                        'Feature': feature_cols,
-                        'Importance': model.feature_importances_
-                    }).sort_values('Importance', ascending=False)
-                    self.feature_importance[(product_id, retailer_id)] = feature_importance
-                    
-                    # Print top 5 features
-                    print("  Top 5 important features:")
-                    print(feature_importance.head(5))
+                inventory_data['disruption'] = (inventory_data['inventory_level'] == 0).astype(int)
+            
+        disruption_results = evaluate_disruption_predictions(
+            inventory_data, disruption_preds, viz_dir
+        )
+        results['disruption_prediction'] = disruption_results
         
-        return self
+        # 3. Evaluate lead time predictions
+        print("\nEvaluating lead time prediction accuracy...")
+        lead_time_results = evaluate_lead_time_accuracy(
+            lead_times, lead_time_preds, viz_dir
+        )
+        results['lead_time_prediction'] = lead_time_results
+        
+        # 4. Evaluate inventory policies
+        print("\nEvaluating inventory policy effectiveness...")
+        # Combine inventory and demand data for a complete view
+        # Match retailer IDs with entity_ids
+        if 'retailer_id' in actual_demand.columns and 'entity_id' in inventory_data.columns:
+            # Find inventory records for retailers
+            retailer_inventory = inventory_data[inventory_data['entity_id'].isin(actual_demand['retailer_id'].unique())]
+            
+            # Rename columns for consistency
+            retailer_inventory = retailer_inventory.rename(columns={'entity_id': 'retailer_id', 'item_id': 'product_id'})
+            
+            # Merge with demand data
+            evaluation_data = pd.merge(
+                retailer_inventory,
+                actual_demand,
+                on=['retailer_id', 'product_id', 'date'],
+                how='inner'
+            )
+            
+            # Evaluate policies
+            policy_results = evaluate_inventory_policy(
+                evaluation_data, inventory_policies, viz_dir
+            )
+            results['inventory_policy'] = policy_results
+        
+        # Save overall results
+        results_df = pd.DataFrame.from_dict({k: v for k, v in results.items() if isinstance(v, dict)}, 
+                                          orient='index')
+        results_df.to_csv(os.path.join(eval_output_dir, 'evaluation_summary.csv'))
+        
+        # Generate comprehensive evaluation report
+        with open(os.path.join(eval_output_dir, 'evaluation_report.txt'), 'w') as f:
+            f.write("SUPPLY CHAIN PREDICTIVE ANALYTICS EVALUATION REPORT\n")
+            f.write("=" * 50 + "\n\n")
+            
+            # Demand Forecast Accuracy
+            f.write("1. DEMAND FORECAST ACCURACY\n")
+            f.write("-" * 30 + "\n")
+            if 'demand_forecast' in results:
+                for metric, value in forecast_results.items():
+                    if isinstance(value, (int, float)):
+                        f.write(f"{metric}: {value:.4f}\n")
+            f.write("\n")
+            
+            # Disruption Prediction Accuracy
+            f.write("2. DISRUPTION PREDICTION ACCURACY\n")
+            f.write("-" * 30 + "\n")
+            if 'disruption_prediction' in results:
+                for metric, value in disruption_results.items():
+                    if isinstance(value, (int, float)):
+                        f.write(f"{metric}: {value:.4f}\n")
+            f.write("\n")
+            
+            # Lead Time Prediction Accuracy
+            f.write("3. LEAD TIME PREDICTION ACCURACY\n")
+            f.write("-" * 30 + "\n")
+            if 'lead_time_prediction' in results:
+                for metric, value in lead_time_results.items():
+                    if isinstance(value, (int, float)):
+                        f.write(f"{metric}: {value:.4f}\n")
+            f.write("\n")
+            
+            # Inventory Policy Effectiveness
+            f.write("4. INVENTORY POLICY EFFECTIVENESS\n")
+            f.write("-" * 30 + "\n")
+            if 'inventory_policy' in results:
+                for metric, value in policy_results.items():
+                    if isinstance(value, (int, float)):
+                        f.write(f"{metric}: {value:.4f}\n")
+            f.write("\n")
+            
+            f.write("=" * 50 + "\n")
+            f.write(f"Report generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        elapsed_time = time.time() - start_time
+        print(f"\nEvaluation completed in {elapsed_time:.2f} seconds.")
+        print(f"Results saved to {eval_output_dir}")
+        print(f"Detailed report: {os.path.join(eval_output_dir, 'evaluation_report.txt')}")
+        
+        return results
     
-    def _generate_cnn_lstm_forecast(self, model, current_sequence, scaler, product_id, retailer_id, last_date, periods_ahead):
-        """Generate forecasts using the CNN-LSTM model."""
-        forecasts = []
-        
-        # Make a copy of the current sequence for forecasting
-        current_seq = current_sequence.copy()
-        
-        for i in range(periods_ahead):
-            # Ensure the sequence has the right shape
-            X_pred = current_seq.reshape(1, self.sequence_length, current_seq.shape[1])
-            
-            # Make prediction
-            pred = model.predict(X_pred, verbose=0)[0][0]
-            
-            # Ensure prediction is non-negative
-            pred = max(0, pred)
-            
-            # Store forecast
-            next_date = last_date + timedelta(days=i+1)
-            forecasts.append({
-                'date': next_date,
-                'product_id': product_id,
-                'retailer_id': retailer_id,
-                'forecasted_demand': round(pred)
-            })
-            
-            # Update sequence for next prediction
-            # Shift sequence and add the new prediction
-            new_row = current_seq[-1].copy()
-            
-            # Replace demand value with the predicted value (assuming it's the last column)
-            new_row[-1] = pred
-            
-            # Update the sequence by sliding the window
-            current_seq = np.vstack([current_seq[1:], [new_row]])
-        
-        return forecasts
+    except Exception as e:
+        print(f"Error during evaluation: {e}")
+        return {}
+
+def main():
+    """Main function to run the pipeline."""
+    parser = argparse.ArgumentParser(description="Run supply chain simulation and predictive analytics pipeline")
+    parser.add_argument("--days", type=int, default=365, help="Number of days to simulate")
+    parser.add_argument("--forecast", type=int, default=30, help="Number of days to forecast")
+    parser.add_argument("--suppliers", type=int, default=5, help="Number of suppliers")
+    parser.add_argument("--manufacturers", type=int, default=3, help="Number of manufacturers")
+    parser.add_argument("--warehouses", type=int, default=4, help="Number of warehouses")
+    parser.add_argument("--retailers", type=int, default=10, help="Number of retailers")
+    parser.add_argument("--model", choices=['cnn_lstm', 'xgboost', 'random_forest'], 
+                        default='cnn_lstm', help="Type of ML model for demand forecasting")
+    parser.add_argument("--skip-sim", action='store_true', help="Skip simulation and use existing data")
+    parser.add_argument("--skip-analytics", action='store_true', help="Skip analytics and use existing results")
+    parser.add_argument("--eval-only", action='store_true', help="Only run evaluation on existing data")
+    parser.add_argument("--external-data", type=str, default=None, help="Path to external indicators data CSV")
+    parser.add_argument("--no-ensemble", action='store_true', help="Disable ensemble models for CNN-LSTM")
+    parser.add_argument("--sequence-length", type=int, default=14, help="Sequence length for CNN-LSTM")
     
-    def predict(self, test_data, periods_ahead=30):
-        """Generate forecasts for future periods using enhanced models."""
-        results = []
+    args = parser.parse_args()
+    
+    # Setup directories
+    sim_output_dir, analytics_output_dir = setup_directories()
+    
+    # Load external data if provided
+    external_data = None
+    if args.external_data:
+        try:
+            external_data = pd.read_csv(args.external_data)
+            print(f"Loaded external data from {args.external_data}: {len(external_data)} records")
+        except Exception as e:
+            print(f"Error loading external data: {e}")
+    
+    # If only evaluation is requested, skip to evaluation
+    if args.eval_only:
+        run_evaluation(sim_output_dir, analytics_output_dir)
+        return
+    
+    # Run simulation unless skipped
+    if not args.skip_sim:
+        # Configure simulation
+        config = DEFAULT_CONFIG.copy()
+        config['num_suppliers'] = args.suppliers
+        config['num_manufacturers'] = args.manufacturers
+        config['num_warehouses'] = args.warehouses
+        config['num_retailers'] = args.retailers
         
-        # Process each product-retailer combination
-        for (product_id, retailer_id), model in self.models.items():
-            # Filter data for this product-retailer
-            subset = test_data[(test_data['product_id'] == product_id) & 
-                              (test_data['retailer_id'] == retailer_id)]
-            
-            if len(subset) == 0:
-                continue
-                
-            # Sort by date
-            subset = subset.sort_values('date')
-            
-            # Get the last date
-            last_date = subset['date'].max()
-            
-            # For CNN-LSTM models
-            if isinstance(model, tf.keras.Model):
-                # Check if we have stored feature sequences
-                if (product_id, retailer_id) not in self.feature_sequences:
-                    # If no stored sequence, prepare data and create sequence
-                    prepared_data = self.prepare_features(subset)
-                    feature_cols = [col for col in prepared_data.columns if col not in 
-                                   ['date', 'product_id', 'retailer_id', 'demand', 
-                                    'fulfilled', 'stockout', 'stockout_rate']]
-                    
-                    if len(prepared_data) >= self.sequence_length:
-                        sequence_data = prepared_data[feature_cols + ['demand']].iloc[-self.sequence_length:].copy()
-                    else:
-                        print(f"  Warning: Not enough data for sequence. Using padding.")
-                        # Pad sequence with repeated first row if needed
-                        first_row = prepared_data[feature_cols + ['demand']].iloc[0].copy()
-                        padding_rows = pd.DataFrame([first_row] * (self.sequence_length - len(prepared_data)),
-                                                  columns=first_row.index)
-                        sequence_data = pd.concat([padding_rows, prepared_data[feature_cols + ['demand']]])
-                        
-                    self.feature_sequences[(product_id, retailer_id)] = sequence_data
-                
-                # Get the stored sequence
-                sequence_data = self.feature_sequences[(product_id, retailer_id)].copy()
-                
-                # Get feature column names (excluding demand which should be the last column)
-                feature_cols = sequence_data.columns.tolist()
-                feature_cols.remove('demand')
-                
-                # Get scaler 
-                scaler = self.scalers[(product_id, retailer_id)]
-                
-                # Scale the sequence data
-                sequence_values = sequence_data[feature_cols].values
-                sequence_values_scaled = scaler.transform(sequence_values)
-                
-                # Add demand column back as the last column
-                current_sequence = np.column_stack((
-                    sequence_values_scaled, 
-                    sequence_data['demand'].values
-                ))
-                
-                # Generate forecasts using CNN-LSTM
-                forecasts = self._generate_cnn_lstm_forecast(
-                    model, current_sequence, scaler, 
-                    product_id, retailer_id, last_date, periods_ahead
-                )
-                
-                results.extend(forecasts)
-                
-            # For traditional ML models (XGBoost, Random Forest)
-            else:
-                # Recursive forecasting for traditional ML
-                forecasts = []
-                current_data = subset.copy()
-                
-                for i in range(periods_ahead):
-                    # Create next day's row
-                    next_date = last_date + timedelta(days=i+1)
-                    next_row = pd.DataFrame({'date': [next_date], 
-                                          'product_id': [product_id],
-                                          'retailer_id': [retailer_id]})
-                    
-                    # Add to current data
-                    temp_data = pd.concat([current_data, next_row])
-                    
-                    # Prepare features
-                    temp_data = self.prepare_features(temp_data)
-                    
-                    # Get features for the new row
-                    new_features = temp_data.iloc[-1:]
-                    feature_cols = [col for col in new_features.columns if col not in 
-                                  ['date', 'product_id', 'retailer_id', 'demand', 
-                                   'fulfilled', 'stockout', 'stockout_rate']]
-                    X_new = new_features[feature_cols]
-                    
-                    # Scale features
-                    scaler = self.scalers[(product_id, retailer_id)]
-                    X_new_scaled = scaler.transform(X_new)
-                    
-                    # Make prediction
-                    pred = model.predict(X_new_scaled)[0]
-                    
-                    # Store forecast
-                    forecasts.append({
-                        'date': next_date,
-                        'product_id': product_id,
-                        'retailer_id': retailer_id,
-                        'forecasted_demand': max(0, round(pred))
-                    })
-                    
-                    # Update for next iteration: add predicted demand
-                    next_row['demand'] = max(0, round(pred))
-                    current_data = pd.concat([current_data, next_row])
-                
-                results.extend(forecasts)
+        # Set simulation time range
+        start_date = datetime.now().strftime('%Y-%m-%d')
+        end_date = (datetime.now() + pd.Timedelta(days=args.days)).strftime('%Y-%m-%d')
+        config['start_date'] = start_date
+        config['end_date'] = end_date
         
-        return pd.DataFrame(results)
+        # Run simulation
+        transaction_df, inventory_df, demand_df = run_simulation(config, sim_output_dir)
+    else:
+        # Load existing simulation data
+        print("\nSkipping simulation, loading existing data...")
+        transaction_df = pd.read_csv(os.path.join(sim_output_dir, 'transactions.csv'))
+        inventory_df = pd.read_csv(os.path.join(sim_output_dir, 'inventory.csv'))
+        demand_df = pd.read_csv(os.path.join(sim_output_dir, 'demand.csv'))
+    
+    # Run analytics unless skipped
+    if not args.skip_analytics:
+        run_analytics(
+            transaction_df, 
+            inventory_df, 
+            demand_df, 
+            analytics_output_dir,
+            forecast_days=args.forecast,
+            model_type=args.model,
+            external_data=external_data
+        )
+    else:
+        print("\nSkipping analytics, using existing results...")
+    
+    # Run evaluation of predictions against actual data
+    run_evaluation(sim_output_dir, analytics_output_dir)
+    
+    print("\n" + "="*80)
+    print("Pipeline Complete".center(80))
+    print("="*80)
+    print(f"Supply Chain Simulation: {args.days} days")
+    print(f"Demand Forecast: {args.forecast} days")
+    print(f"Model Type: {args.model}")
+    print(f"Analytics Results: {analytics_output_dir}")
+    print("="*80)
+
+if __name__ == "__main__":
+    main()
