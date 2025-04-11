@@ -404,7 +404,7 @@ def evaluate_forecast_with_confidence(actual_data, forecast_data, alpha=0.05):
 
 def evaluate_disruption_predictions(actual_data, prediction_data, output_dir=None):
     """
-    Evaluate disruption prediction accuracy.
+    Evaluate disruption prediction accuracy with improved handling of extreme predictions.
     
     Args:
         actual_data (pd.DataFrame): DataFrame with actual disruption indicators
@@ -416,38 +416,34 @@ def evaluate_disruption_predictions(actual_data, prediction_data, output_dir=Non
     """
     print("Evaluating disruption prediction accuracy...")
     
-    # Check if data exists
+    # Check if data exists and columns
     if actual_data is None or prediction_data is None:
         print("ERROR: Missing data for evaluation")
         return {'error': 'Missing data'}
     
-    # Check if necessary columns exist
-    if 'disruption' not in actual_data.columns and 'stockout' not in actual_data.columns:
-        print("ERROR: Missing disruption/stockout column in actual data")
-        return {'error': 'Missing disruption column in actual data'}
+    # Determine disruption column
+    disruption_col = 'disruption' if 'disruption' in actual_data.columns else 'stockout'
+    if disruption_col not in actual_data.columns:
+        print(f"ERROR: Missing {disruption_col} column in actual data")
+        return {'error': f'Missing {disruption_col} column in actual data'}
     
     if 'disruption_probability' not in prediction_data.columns:
         print("ERROR: Missing disruption_probability column in prediction data")
         return {'error': 'Missing disruption_probability column in prediction data'}
     
-    # Rename columns if needed
+    # Rename columns if needed for consistency
     if 'entity_id' in actual_data.columns and 'retailer_id' in prediction_data.columns:
         actual_data = actual_data.rename(columns={'entity_id': 'retailer_id'})
     
     if 'item_id' in actual_data.columns and 'product_id' in prediction_data.columns:
         actual_data = actual_data.rename(columns={'item_id': 'product_id'})
     
-    # Convert dates to datetime if they're not already
-    if 'date' in actual_data.columns:
-        actual_data['date'] = pd.to_datetime(actual_data['date'])
+    # Convert dates to datetime
+    for df in [actual_data, prediction_data]:
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
     
-    if 'date' in prediction_data.columns:
-        prediction_data['date'] = pd.to_datetime(prediction_data['date'])
-    
-    # Determine disruption column
-    disruption_col = 'disruption' if 'disruption' in actual_data.columns else 'stockout'
-    
-    # Merge data on date, product_id, and retailer_id
+    # Merge data
     merged_data = pd.merge(
         actual_data,
         prediction_data,
@@ -459,28 +455,63 @@ def evaluate_disruption_predictions(actual_data, prediction_data, output_dir=Non
         print("ERROR: No matching data points after merge")
         return {'error': 'No matching data points'}
     
+    # FIX: Check for extreme probability values and adjust slightly to avoid perfect separation
+    if (merged_data['disruption_probability'] == 0).any() or (merged_data['disruption_probability'] == 1).any():
+        print("Warning: Extreme probability values detected, applying small adjustment")
+        # Adjust 0 to 0.001 and 1 to 0.999 to avoid perfect separation
+        merged_data['disruption_probability'] = merged_data['disruption_probability'].replace(0, 0.001)
+        merged_data['disruption_probability'] = merged_data['disruption_probability'].replace(1, 0.999)
+    
     # Convert disruption probability to binary predictions using 0.5 threshold
     merged_data['predicted_disruption'] = (merged_data['disruption_probability'] >= 0.5).astype(int)
     
-    # Calculate accuracy metrics
+    # Calculate metrics
     y_true = merged_data[disruption_col]
     y_pred = merged_data['predicted_disruption']
     y_prob = merged_data['disruption_probability']
     
-    # Basic classification metrics
+    # Check class distribution
+    class_counts = y_true.value_counts()
+    print(f"Actual class distribution: {dict(class_counts)}")
+    
+    pred_class_counts = y_pred.value_counts()
+    print(f"Predicted class distribution: {dict(pred_class_counts)}")
+    
+    # Basic metrics
     accuracy = accuracy_score(y_true, y_pred)
-    precision = precision_score(y_true, y_pred, zero_division=0)
-    recall = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
+    
+    # Handle cases where all predictions are the same class
+    try:
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+    except Exception as e:
+        print(f"Warning: Error calculating precision/recall: {e}")
+        precision = recall = f1 = 0
     
     # Calculate AUC-ROC if there are both positive and negative classes
-    if len(np.unique(y_true)) > 1:
-        auc_roc = roc_auc_score(y_true, y_prob)
-    else:
+    try:
+        if len(np.unique(y_true)) > 1 and len(np.unique(y_prob)) > 1:
+            auc_roc = roc_auc_score(y_true, y_prob)
+        else:
+            print("Warning: Cannot calculate AUC-ROC - insufficient class or probability variability")
+            auc_roc = np.nan
+    except Exception as e:
+        print(f"Warning: Error calculating AUC-ROC: {e}")
         auc_roc = np.nan
     
     # Calculate confusion matrix
     cm = confusion_matrix(y_true, y_pred)
+    
+    # FIX: Handle confusion matrix with missing classes
+    # If confusion matrix is 1x1, expand it to 2x2
+    if cm.shape == (1, 1):
+        if y_true.iloc[0] == 1:  # All positives
+            cm = np.array([[0, 0], [0, cm[0, 0]]])
+            print("Note: Expanded confusion matrix - all samples are positive class")
+        else:  # All negatives
+            cm = np.array([[cm[0, 0], 0], [0, 0]])
+            print("Note: Expanded confusion matrix - all samples are negative class")
     
     # Convert confusion matrix to dictionary
     try:
@@ -491,9 +522,25 @@ def evaluate_disruption_predictions(actual_data, prediction_data, output_dir=Non
             'true_positive': cm[1, 1]
         }
     except IndexError:
-        cm_dict = {'error': 'Could not calculate confusion matrix'}
+        # If still having issues, create a default dictionary
+        cm_dict = {
+            'true_negative': 0,
+            'false_positive': 0,
+            'false_negative': 0,
+            'true_positive': 0
+        }
+        # Set the appropriate value based on what we have
+        if len(y_true) > 0:
+            if y_true.iloc[0] == 1 and y_pred.iloc[0] == 1:  # All true positives
+                cm_dict['true_positive'] = len(y_true)
+            elif y_true.iloc[0] == 0 and y_pred.iloc[0] == 0:  # All true negatives
+                cm_dict['true_negative'] = len(y_true)
+            elif y_true.iloc[0] == 1 and y_pred.iloc[0] == 0:  # All false negatives
+                cm_dict['false_negative'] = len(y_true)
+            elif y_true.iloc[0] == 0 and y_pred.iloc[0] == 1:  # All false positives
+                cm_dict['false_positive'] = len(y_true)
     
-    # Create results dictionary
+    # Results
     results = {
         'accuracy': accuracy,
         'precision': precision,
@@ -504,36 +551,25 @@ def evaluate_disruption_predictions(actual_data, prediction_data, output_dir=Non
         'num_data_points': len(merged_data)
     }
     
-    # Calculate by-product metrics
-    product_metrics = merged_data.groupby('product_id').apply(
-        lambda x: pd.Series({
-            'accuracy': accuracy_score(x[disruption_col], x['predicted_disruption']),
-            'precision': precision_score(x[disruption_col], x['predicted_disruption'], zero_division=0),
-            'recall': recall_score(x[disruption_col], x['predicted_disruption'], zero_division=0),
-            'count': len(x)
-        })
-    )
-    
-    # Calculate by-retailer metrics
-    retailer_metrics = merged_data.groupby('retailer_id').apply(
-        lambda x: pd.Series({
-            'accuracy': accuracy_score(x[disruption_col], x['predicted_disruption']),
-            'precision': precision_score(x[disruption_col], x['predicted_disruption'], zero_division=0),
-            'recall': recall_score(x[disruption_col], x['predicted_disruption'], zero_division=0),
-            'count': len(x)
-        })
-    )
-    
-    # Save metrics by product and retailer
-    results['by_product'] = product_metrics.to_dict()
-    results['by_retailer'] = retailer_metrics.to_dict()
-    
-    # Generate visualizations if output directory provided
+    # Generate visualizations
     if output_dir:
         try:
-            # Create confusion matrix visualization
+            # Create confusion matrix visualization with improved handling
             plt.figure(figsize=(8, 6))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False)
+            
+            # FIX: Ensure we have a 2x2 matrix for visualization
+            if cm.shape == (2, 2):
+                display_cm = cm
+            else:
+                # Create a default 2x2 matrix
+                display_cm = np.zeros((2, 2))
+                # Fill with the values we have
+                for i in range(min(cm.shape[0], 2)):
+                    for j in range(min(cm.shape[1], 2)):
+                        display_cm[i, j] = cm[i, j]
+            
+            # Use a colormap that works well even with zeros
+            sns.heatmap(display_cm, annot=True, fmt='d', cmap='Blues', cbar=False)
             plt.xlabel('Predicted')
             plt.ylabel('Actual')
             plt.title('Disruption Prediction Confusion Matrix')
@@ -543,27 +579,30 @@ def evaluate_disruption_predictions(actual_data, prediction_data, output_dir=Non
             plt.savefig(os.path.join(output_dir, 'disruption_confusion_matrix.png'))
             plt.close()
             
-            # Create probability distribution by actual class
+            # Create probability distribution visualization
             plt.figure(figsize=(10, 6))
             
-            # Plot probability distribution for actual disruptions
-            sns.kdeplot(
-                merged_data[merged_data[disruption_col] == 1]['disruption_probability'],
-                label='Actual Disruptions',
-                shade=True,
-                color='red'
-            )
+            # Check if we have enough data points of each class
+            if (y_true == 1).sum() > 0:
+                sns.histplot(
+                    merged_data[merged_data[disruption_col] == 1]['disruption_probability'],
+                    label='Actual Disruptions',
+                    color='red',
+                    alpha=0.6,
+                    bins=20
+                )
             
-            # Plot probability distribution for non-disruptions
-            sns.kdeplot(
-                merged_data[merged_data[disruption_col] == 0]['disruption_probability'],
-                label='No Disruptions',
-                shade=True,
-                color='blue'
-            )
+            if (y_true == 0).sum() > 0:
+                sns.histplot(
+                    merged_data[merged_data[disruption_col] == 0]['disruption_probability'],
+                    label='No Disruptions',
+                    color='blue',
+                    alpha=0.6,
+                    bins=20
+                )
             
             plt.xlabel('Predicted Disruption Probability')
-            plt.ylabel('Density')
+            plt.ylabel('Count')
             plt.title('Distribution of Predicted Probabilities by Actual Outcome')
             plt.legend()
             plt.grid(True, alpha=0.3)
@@ -582,10 +621,13 @@ def evaluate_disruption_predictions(actual_data, prediction_data, output_dir=Non
     print(f"  Precision: {precision:.4f}")
     print(f"  Recall: {recall:.4f}")
     print(f"  F1 Score: {f1:.4f}")
-    print(f"  AUC-ROC: {auc_roc:.4f}")
+    if not np.isnan(auc_roc):
+        print(f"  AUC-ROC: {auc_roc:.4f}")
     print(f"  Data points: {len(merged_data)}")
+    print(f"  Confusion Matrix: {cm_dict}")
     
     return results
+
 
 def evaluate_lead_time_accuracy(actual_data, prediction_data, output_dir=None):
     """
