@@ -1,0 +1,3 @@
+,Accuracy,Precision,Recall,F1,Specificity,False_Alarm_Rate,Miss_Rate,Sample_Count,MAE,RMSE,MAPE,R2,Within_1day,Within_2days,Within_3days
+disruption_prediction,1.0,1.0,1.0,1.0,1.0,0.0,0.0,18980,,,,,,,
+lead_time_prediction,,,,,,,,20,2.4132992067271326,2.9104284732206462,44.97524560409116,0.09186878609129345,0.3,0.45,0.55
