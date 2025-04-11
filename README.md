@@ -13,10 +13,6 @@ This project implements an advanced deep learning approach to predict product de
 - Comprehensive evaluation metrics with confidence intervals
 - Supply chain simulation for generating synthetic data
 
-## Project Structure
-
-supply-chain-forecasting/ ├── analytics/ │ ├── models/ │ │ ├── demand_forecaster.py # Main CNN-LSTM implementation │ │ ├── disruption_predictor.py # Predicts supply chain disruptions │ │ ├── lead_time_predictor.py # Predicts supplier lead times │ │ └── inventory_optimizer.py # Optimizes inventory policies │ └── utils/ │ └── evaluation_report.py # Evaluation metrics and visualizations ├── simulation/ │ ├── supply_chain_simulator.py # Simulates supply chain dynamics │ └── config.py # Configuration parameters ├── output/ │ ├── analytics/ # Analytics results │ │ └── evaluation/ # Evaluation results and visualizations │ └── simulation/ # Simulation data ├── run_pipeline.py # Main execution script ├── requirements.txt # Project dependencies └── README.md
-
 
 
 ## Installation
