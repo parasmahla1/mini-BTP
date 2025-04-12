@@ -19,7 +19,8 @@ class DemandForecaster:
     DemandForecaster using deep learning models for time series forecasting.
     """
     
-    def __init__(self, model_type='cnn_lstm', sequence_length=14, batch_size=32, epochs=100, use_ensemble=False):
+    def __init__(self, model_type='cnn_lstm', sequence_length=14, batch_size=32, 
+                epochs=100, use_ensemble=False, model_size='large'):
         """
         Initialize the demand forecaster with configurable parameters.
         
@@ -29,12 +30,14 @@ class DemandForecaster:
             batch_size: Training batch size
             epochs: Maximum training epochs
             use_ensemble: Whether to use ensemble of models
+            model_size: Model capacity ('small', 'medium', 'large', 'xlarge')
         """
         self.model_type = model_type
         self.sequence_length = sequence_length
         self.batch_size = batch_size
         self.epochs = epochs
         self.use_ensemble = use_ensemble
+        self.model_size = model_size
         self.forecast_horizon = 7  # Default forecast horizon (1 week)
         
         # Initialize scalers
@@ -81,9 +84,11 @@ class DemandForecaster:
         if 'date' in df.columns:
             df['dayofweek'] = pd.to_datetime(df['date']).dt.dayofweek
             df['month'] = pd.to_datetime(df['date']).dt.month
+            df['quarter'] = pd.to_datetime(df['date']).dt.quarter
+            df['year'] = pd.to_datetime(df['date']).dt.year
             
             # One-hot encode categorical time features
-            df = pd.get_dummies(df, columns=['dayofweek', 'month'])
+            df = pd.get_dummies(df, columns=['dayofweek', 'month', 'quarter'])
         
         # Fill missing values
         df = df.fillna(method='ffill').fillna(0)
@@ -91,13 +96,21 @@ class DemandForecaster:
         # Add lagged features (only for deep learning models)
         if self.model_type in ['cnn_lstm', 'lstm']:
             # Add lags if we have enough data
-            min_periods = min(5, max(1, len(df) // 10))
+            min_periods = min(7, max(1, len(df) // 10))
             for lag in range(1, min_periods + 1):
                 df[f'demand_lag_{lag}'] = df[self.target_col].shift(lag)
             
             # Add rolling statistics if we have enough data
             if len(df) >= 7:
                 df['demand_rolling_mean_7d'] = df[self.target_col].rolling(window=7, min_periods=1).mean()
+                df['demand_rolling_std_7d'] = df[self.target_col].rolling(window=7, min_periods=1).std().fillna(0)
+                
+            if len(df) >= 14:
+                df['demand_rolling_mean_14d'] = df[self.target_col].rolling(window=14, min_periods=1).mean()
+                
+            # Add trend features
+            df['demand_diff_1d'] = df[self.target_col].diff().fillna(0)
+            df['demand_diff_7d'] = df[self.target_col].diff(7).fillna(0)
                 
             # Fill any remaining NAs from lag creation
             df = df.fillna(0)
@@ -150,7 +163,7 @@ class DemandForecaster:
     
     def _build_cnn_lstm_model(self, input_shape):
         """
-        Build the CNN-LSTM model architecture.
+        Build an enhanced CNN-LSTM model architecture with ~1M parameters.
         
         Args:
             input_shape: Shape of input data (sequence_length, n_features)
@@ -161,31 +174,103 @@ class DemandForecaster:
         # Input layer
         inputs = Input(shape=input_shape)
         
-        # CNN layers for feature extraction
-        x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(inputs)
-        x = BatchNormalization()(x)
-        x = Conv1D(filters=128, kernel_size=3, padding='same', activation='relu')(x)
-        x = BatchNormalization()(x)
+        # Adjust architecture based on model size
+        if self.model_size == 'small':
+            # Small model (~100K parameters)
+            conv1 = Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(inputs)
+            conv1 = BatchNormalization()(conv1)
+            
+            lstm1 = LSTM(64)(conv1)
+            dense1 = Dense(32, activation='relu')(lstm1)
+            outputs = Dense(self.forecast_horizon)(dense1)
+            
+        elif self.model_size == 'medium':
+            # Medium model (~250K parameters)
+            conv1 = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(inputs)
+            conv1 = BatchNormalization()(conv1)
+            
+            conv2 = Conv1D(filters=128, kernel_size=3, padding='same', activation='relu')(conv1)
+            conv2 = BatchNormalization()(conv2)
+            
+            lstm1 = LSTM(128)(conv2)
+            dense1 = Dense(64, activation='relu')(lstm1)
+            outputs = Dense(self.forecast_horizon)(dense1)
+            
+        elif self.model_size == 'large':
+            # Large model (~500K-1M parameters)
+            # Multi-scale CNN feature extraction with multiple filter sizes
+            conv1_1 = Conv1D(filters=128, kernel_size=2, padding='same', activation='relu')(inputs)
+            conv1_2 = Conv1D(filters=128, kernel_size=3, padding='same', activation='relu')(inputs)
+            conv1 = Concatenate()([conv1_1, conv1_2])
+            conv1 = BatchNormalization()(conv1)
+            
+            conv2 = Conv1D(filters=192, kernel_size=3, padding='same', activation='relu')(conv1)
+            conv2 = BatchNormalization()(conv2)
+            
+            lstm1 = Bidirectional(LSTM(192))(conv2)
+            lstm1 = Dropout(0.3)(lstm1)
+            
+            dense1 = Dense(256, activation='relu')(lstm1)
+            dense1 = BatchNormalization()(dense1)
+            dense1 = Dropout(0.3)(dense1)
+            
+            dense2 = Dense(128, activation='relu')(dense1)
+            outputs = Dense(self.forecast_horizon)(dense2)
+            
+        else:  # xlarge
+            # XLarge model (>1M parameters)
+            # Multi-scale CNN feature extraction with multiple filter sizes
+            conv1_1 = Conv1D(filters=128, kernel_size=2, padding='same', activation='relu')(inputs)
+            conv1_2 = Conv1D(filters=128, kernel_size=3, padding='same', activation='relu')(inputs)
+            conv1_3 = Conv1D(filters=128, kernel_size=5, padding='same', activation='relu')(inputs)
+            conv1 = Concatenate()([conv1_1, conv1_2, conv1_3])  # Combine different receptive fields
+            conv1 = BatchNormalization()(conv1)
+            
+            # Second convolutional block
+            conv2_1 = Conv1D(filters=192, kernel_size=2, padding='same', activation='relu')(conv1)
+            conv2_2 = Conv1D(filters=192, kernel_size=3, padding='same', activation='relu')(conv1)
+            conv2 = Concatenate()([conv2_1, conv2_2])
+            conv2 = BatchNormalization()(conv2)
+            
+            # Third convolutional block
+            conv3 = Conv1D(filters=256, kernel_size=3, padding='same', activation='relu')(conv2)
+            conv3 = BatchNormalization()(conv3)
+            
+            # Bidirectional LSTM layers
+            lstm1 = Bidirectional(LSTM(256, return_sequences=True))(conv3)
+            lstm1 = Dropout(0.3)(lstm1)
+            
+            lstm2 = Bidirectional(LSTM(192, return_sequences=False))(lstm1)
+            lstm2 = Dropout(0.3)(lstm2)
+            
+            # Fully connected layers
+            dense1 = Dense(512, activation='relu')(lstm2)
+            dense1 = BatchNormalization()(dense1)
+            dense1 = Dropout(0.3)(dense1)
+            
+            dense2 = Dense(256, activation='relu')(dense1)
+            dense2 = BatchNormalization()(dense2)
+            dense2 = Dropout(0.2)(dense2)
+            
+            outputs = Dense(self.forecast_horizon)(dense2)
         
-        # LSTM layer for temporal dependencies
-        x = LSTM(128, return_sequences=False)(x)
-        x = Dropout(0.2)(x)
-        
-        # Dense layers for output
-        x = Dense(64, activation='relu')(x)
-        x = Dropout(0.2)(x)
-        outputs = Dense(self.forecast_horizon)(x)
-        
-        # Create and compile model
+        # Create model
         model = Model(inputs=inputs, outputs=outputs)
-        optimizer = Adam(learning_rate=0.001)
+        
+        # Count parameters (for verification)
+        total_params = model.count_params()
+        print(f"Total model parameters: {total_params:,}")
+        
+        # Use a slower learning rate for larger models to avoid instability
+        learning_rate = 0.001 if self.model_size in ['small', 'medium'] else 0.0005
+        optimizer = Adam(learning_rate=learning_rate)
         model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
         
         return model
     
     def _build_lstm_model(self, input_shape):
         """
-        Build a simple LSTM model.
+        Build a LSTM model.
         
         Args:
             input_shape: Shape of input data
@@ -193,9 +278,28 @@ class DemandForecaster:
         Returns:
             Compiled keras model
         """
-        model = Sequential()
-        model.add(LSTM(100, activation='relu', input_shape=input_shape))
-        model.add(Dense(self.forecast_horizon))
+        if self.model_size == 'xlarge':
+            model = Sequential()
+            model.add(Bidirectional(LSTM(256, return_sequences=True, input_shape=input_shape)))
+            model.add(Dropout(0.3))
+            model.add(Bidirectional(LSTM(256, return_sequences=True)))
+            model.add(Dropout(0.3))
+            model.add(Bidirectional(LSTM(128)))
+            model.add(Dense(256, activation='relu'))
+            model.add(Dropout(0.3))
+            model.add(Dense(self.forecast_horizon))
+        else:
+            model = Sequential()
+            model.add(LSTM(192, activation='relu', input_shape=input_shape))
+            model.add(Dropout(0.3))
+            model.add(Dense(128, activation='relu'))
+            model.add(Dropout(0.2))
+            model.add(Dense(self.forecast_horizon))
+            
+        # Count parameters for verification
+        total_params = model.count_params()
+        print(f"Total model parameters: {total_params:,}")
+            
         model.compile(optimizer='adam', loss='mse', metrics=['mae'])
         return model
     
@@ -235,10 +339,15 @@ class DemandForecaster:
         X_train, X_val = X[:train_size], X[train_size:]
         y_train, y_val = y[:train_size], y[train_size:]
         
+        # Print shapes
+        print(f"Training data shape: X = {X_train.shape}, y = {y_train.shape}")
+        print(f"Validation data shape: X = {X_val.shape}, y = {y_val.shape}")
+        
         # Setup callbacks
         callbacks = [
-            EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
-            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
+            EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
+            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=7, min_lr=1e-6),
+            ModelCheckpoint('best_demand_model.h5', save_best_only=True)
         ]
         
         # Build and train model based on type
@@ -260,7 +369,36 @@ class DemandForecaster:
             verbose=1
         )
         
+        # Plot training history
+        self._plot_history(self.history)
+        
         return self
+    
+    def _plot_history(self, history):
+        """Plot training and validation loss."""
+        try:
+            plt.figure(figsize=(12, 5))
+            plt.subplot(1, 2, 1)
+            plt.plot(history.history['loss'], label='Train Loss')
+            plt.plot(history.history['val_loss'], label='Validation Loss')
+            plt.title('Model Loss')
+            plt.ylabel('Loss')
+            plt.xlabel('Epoch')
+            plt.legend()
+            
+            plt.subplot(1, 2, 2)
+            plt.plot(history.history['mae'], label='Train MAE')
+            plt.plot(history.history['val_mae'], label='Validation MAE')
+            plt.title('Model MAE')
+            plt.ylabel('MAE')
+            plt.xlabel('Epoch')
+            plt.legend()
+            
+            plt.tight_layout()
+            plt.savefig('demand_forecast_training_history.png')
+            plt.close()
+        except Exception as e:
+            print(f"Could not plot training history: {e}")
     
     def predict(self, data, periods_ahead=None, return_conf_int=False):
         """
@@ -296,8 +434,40 @@ class DemandForecaster:
         # Generate predictions
         predictions = self.model.predict(X)
         
-        # Inverse transform predictions to original scale
-        predictions = self.scaler_y.inverse_transform(predictions)
+        # Generate confidence intervals via Monte Carlo Dropout if requested
+        if return_conf_int:
+            # Use MC Dropout for uncertainty estimation
+            n_samples = 20
+            dropout_preds = []
+            
+            # Create a function that runs the model in training mode (with dropout active)
+            def mc_predict(model, x):
+                return model(x, training=True).numpy()
+            
+            # Get multiple predictions with dropout active
+            for _ in range(n_samples):
+                dropout_preds.append(mc_predict(self.model, X))
+            
+            dropout_preds = np.array(dropout_preds)
+            mean_preds = np.mean(dropout_preds, axis=0)
+            std_preds = np.std(dropout_preds, axis=0)
+            
+            # Inverse transform mean and std to original scale
+            mean_scaled = self.scaler_y.inverse_transform(mean_preds)
+            
+            # Scale the standard deviation
+            y_scale = self.scaler_y.scale_
+            std_scaled = std_preds * y_scale[0]
+            
+            # 95% confidence intervals (±2σ)
+            lower_bounds = np.maximum(0, mean_scaled - 2 * std_scaled)  # No negative predictions
+            upper_bounds = mean_scaled + 2 * std_scaled
+            
+            # Use the mean as our prediction
+            predictions_orig = mean_scaled
+        else:
+            # Inverse transform predictions to original scale
+            predictions_orig = self.scaler_y.inverse_transform(predictions)
         
         # Create forecast DataFrame
         last_date = pd.to_datetime(data['date'].iloc[-1])
@@ -309,7 +479,7 @@ class DemandForecaster:
         
         forecast_df = pd.DataFrame({
             'date': dates,
-            'forecast': predictions[-1]  # Use the most recent prediction
+            'forecast': predictions_orig[-1]  # Use the most recent prediction
         })
         
         # Add product and retailer IDs if they exist in original data
@@ -317,12 +487,10 @@ class DemandForecaster:
             if col in data.columns:
                 forecast_df[col] = data[col].iloc[-1]
         
-        # Add confidence intervals if requested (simple method)
+        # Add confidence intervals if requested
         if return_conf_int:
-            std_dev = 0.1 * predictions[-1]  # Simple approximation
-            forecast_df['lower_bound'] = predictions[-1] - 2 * std_dev
-            forecast_df['upper_bound'] = predictions[-1] + 2 * std_dev
-            forecast_df['lower_bound'] = forecast_df['lower_bound'].clip(0)  # No negative demand
+            forecast_df['lower_bound'] = lower_bounds[-1]
+            forecast_df['upper_bound'] = upper_bounds[-1]
         
         return forecast_df
     
@@ -397,7 +565,8 @@ class DemandForecaster:
             'epochs': self.epochs,
             'forecast_horizon': self.forecast_horizon,
             'feature_cols': self.feature_cols,
-            'target_col': self.target_col
+            'target_col': self.target_col,
+            'model_size': self.model_size
         }
         
         joblib.dump(params, filepath + '_params.pkl')

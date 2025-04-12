@@ -74,47 +74,27 @@ def run_analytics(transaction_data, inventory_data, demand_data, output_dir, for
     print("Running Predictive Analytics".center(80))
     print("="*80)
     
-    start_time = time.time()
+    # ...existing code...
     
-    # Print column names for debugging
-    print("\nChecking data structure:")
-    print(f"Transaction data shape: {transaction_data.shape}")
-    print(f"Inventory data shape: {inventory_data.shape}")
-    print(f"Demand data shape: {demand_data.shape}")
-    
-    # Print first few rows to understand structure
-    print("\nTransaction data sample:")
-    print(transaction_data.head(2))
-    
-    # Ensure date columns are datetime
-    for df in [transaction_data, inventory_data, demand_data]:
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'])
-    
-    # Calculate lead times for orders
-    print("\nCalculating lead times from transaction data...")
-    lead_times = calculate_lead_times(transaction_data)
-    lead_times.to_csv(os.path.join(output_dir, 'lead_times.csv'), index=False)
-    print(f"Generated {len(lead_times)} lead time records")
-    
-    # Train demand forecasting model
+    # Train demand forecasting model with improved architecture
     print(f"\nTraining demand forecasting model using {model_type}...")
     
-    # Initialize with parameters that the DemandForecaster class accepts
+    # Initialize with enhanced parameters
     demand_forecaster = DemandForecaster(
-        model_type=model_type,       # Model type is supported now
-        sequence_length=14,          # Use 2 weeks of history
-        batch_size=32,               
-        epochs=100,                  # Max training epochs
-        use_ensemble=False           # Set to True if you want ensemble models
+        model_type=model_type,
+        sequence_length=21,          # Increased history window (3 weeks)
+        batch_size=32,               # Standard batch size
+        epochs=150,                  # More training epochs
+        use_ensemble=False,          # Single model for now
+        model_size='xlarge'          # Use larger model with ~1M params
     )
     
     try:
         demand_forecaster.fit(demand_data)
         
-        # Generate demand forecast
-        print(f"Generating {forecast_days}-day demand forecast...")
-        forecast_data = demand_forecaster.predict(demand_data, periods_ahead=forecast_days)
+        # Generate demand forecast with confidence intervals
+        print(f"Generating {forecast_days}-day demand forecast with confidence intervals...")
+        forecast_data = demand_forecaster.predict(demand_data, periods_ahead=forecast_days, return_conf_int=True)
         forecast_data.to_csv(os.path.join(output_dir, 'demand_forecast.csv'), index=False)
         
         # Create sample forecast visualization
