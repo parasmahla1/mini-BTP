@@ -98,14 +98,17 @@ def run_analytics(transaction_data, inventory_data, demand_data, output_dir, for
     print(f"Generated {len(lead_times)} lead time records")
     
     # Train demand forecasting model
-    print("\nTraining demand forecasting model using " + model_type + "...")
+    print(f"\nTraining demand forecasting model using {model_type}...")
     
-
-
-    # Initialize with new parameters
-    demand_forecaster = DemandForecaster(model_type=model_type)
-    demand_forecaster.sequence_length = 14  # Adjust as needed
-    demand_forecaster.use_ensemble = True  # Set to False if not using ensemble
+    # Initialize with parameters that the DemandForecaster class accepts
+    demand_forecaster = DemandForecaster(
+        model_type=model_type,       # Model type is supported now
+        sequence_length=14,          # Use 2 weeks of history
+        batch_size=32,               
+        epochs=100,                  # Max training epochs
+        use_ensemble=False           # Set to True if you want ensemble models
+    )
+    
     try:
         demand_forecaster.fit(demand_data)
         
@@ -117,13 +120,15 @@ def run_analytics(transaction_data, inventory_data, demand_data, output_dir, for
         # Create sample forecast visualization
         if len(forecast_data) > 0:
             print("Creating forecast visualizations...")
-            product_id = demand_data['product_id'].iloc[0]
-            retailer_id = demand_data['retailer_id'].iloc[0]
+            product_id = demand_data['product_id'].iloc[0] if 'product_id' in demand_data.columns else None
+            retailer_id = demand_data['retailer_id'].iloc[0] if 'retailer_id' in demand_data.columns else None
+            
             plt_obj = plot_demand_forecast(demand_data, forecast_data, product_id, retailer_id)
             plt_obj.savefig(os.path.join(output_dir, 'demand_forecast_sample.png'))
             plt.close()
     except Exception as e:
         print(f"Error in demand forecasting: {e}")
+    
     
     # Optimize inventory
     print("\nOptimizing inventory policies...")
