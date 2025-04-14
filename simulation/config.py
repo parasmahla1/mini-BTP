@@ -5,15 +5,15 @@ Configuration settings for the supply chain simulation.
 DEFAULT_CONFIG = {
     # Simulation time range
     'start_date': '2023-01-01',
-    'end_date': '2023-12-31',
+    'end_date': '2025-12-31',
     
     # Supply chain structure
-    'num_suppliers': 5,
-    'num_manufacturers': 3,
-    'num_warehouses': 4,
-    'num_retailers': 10,
-    'num_products': 6,
-    'num_materials': 10,
+    'num_suppliers': 25,
+    'num_manufacturers': 18,
+    'num_warehouses': 10,
+    'num_retailers': 30,
+    'num_products': 30,
+    'num_materials': 30,
     
     # Disruption events
     'enable_disruptions': True,

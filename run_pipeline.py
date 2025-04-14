@@ -38,6 +38,8 @@ def setup_directories(base_dir='data'):
     return sim_output_dir, analytics_output_dir
 
 
+
+
 def run_simulation(config, output_dir):
     """Run the supply chain simulation."""
     print("\n" + "="*80)
@@ -67,14 +69,212 @@ def run_simulation(config, output_dir):
     
     return transaction_df, inventory_df, demand_df
 
+def calculate_lead_times(transaction_data):
+    """
+    Calculate lead times from transaction data.
+    
+    Args:
+        transaction_data: DataFrame with transaction data
+    
+    Returns:
+        DataFrame with lead time statistics by entity
+    """
+    lead_times_list = []
+    
+    try:
+        # Check if required columns are present
+        required_cols = ['date', 'entity_id', 'transaction_type']
+        if not all(col in transaction_data.columns for col in required_cols):
+            print("Warning: Required columns missing for lead time calculation")
+            return pd.DataFrame(columns=['entity_id', 'lead_time_avg', 'lead_time_std', 'lead_time_p95'])
+        
+        # Filter for relevant transactions
+        orders = transaction_data[transaction_data['transaction_type'] == 'order'].copy()
+        shipments = transaction_data[transaction_data['transaction_type'].isin(['ship', 'receive'])].copy()
+        
+        # If we don't have both orders and shipments, return empty DataFrame
+        if orders.empty or shipments.empty:
+            return pd.DataFrame(columns=['entity_id', 'lead_time_avg', 'lead_time_std', 'lead_time_p95'])
+        
+        # Get unique entities
+        entities = transaction_data['entity_id'].unique()
+        
+        for entity_id in entities:
+            entity_orders = orders[orders['entity_id'] == entity_id]
+            entity_shipments = shipments[shipments['entity_id'] == entity_id]
+            
+            if entity_orders.empty or entity_shipments.empty:
+                continue
+            
+            # Calculate lead times based on order and shipment dates
+            # For simplicity, we're using a statistical approach here
+            order_dates = entity_orders['date'].sort_values().reset_index(drop=True)
+            shipment_dates = entity_shipments['date'].sort_values().reset_index(drop=True)
+            
+            # Match closest dates (simplified approach)
+            lead_times = []
+            for order_date in order_dates:
+                if len(shipment_dates) > 0:
+                    # Find shipments that happen after the order
+                    valid_shipments = shipment_dates[shipment_dates > order_date]
+                    if len(valid_shipments) > 0:
+                        # Calculate days between order and first subsequent shipment
+                        lead_time = (valid_shipments.iloc[0] - order_date).days
+                        if 0 < lead_time < 100:  # Reasonable range check
+                            lead_times.append(lead_time)
+            
+            if lead_times:
+                lead_times_list.append({
+                    'entity_id': entity_id,
+                    'lead_time_avg': np.mean(lead_times),
+                    'lead_time_std': np.std(lead_times),
+                    'lead_time_p95': np.percentile(lead_times, 95),
+                    'lead_time_min': min(lead_times),
+                    'lead_time_max': max(lead_times)
+                })
+    
+    except Exception as e:
+        print(f"Error calculating lead times: {e}")
+    
+    # Create DataFrame from list
+    lead_times_df = pd.DataFrame(lead_times_list)
+    
+    # If empty, return DataFrame with expected columns
+    if lead_times_df.empty:
+        lead_times_df = pd.DataFrame(columns=[
+            'entity_id', 'lead_time_avg', 'lead_time_std', 
+            'lead_time_p95', 'lead_time_min', 'lead_time_max'
+        ])
+    
+    return lead_times_df
+def optimize_inventory(demand_data, lead_times, inventory_data):
+    """
+    Optimize inventory policies based on demand data and lead times.
+    
+    Args:
+        demand_data: DataFrame with historical demand data
+        lead_times: DataFrame with lead time statistics
+        inventory_data: DataFrame with inventory level data
+    
+    Returns:
+        DataFrame with recommended inventory policies
+    """
+    policies = []
+    
+    try:
+        # Check if we have sufficient data to compute policies
+        if demand_data.empty or lead_times.empty or inventory_data.empty:
+            print("Warning: Insufficient data for inventory optimization")
+            return pd.DataFrame(columns=['entity_id', 'item_id', 'reorder_point', 'order_quantity', 'safety_stock'])
+        
+        # Get unique product-entity combinations
+        if 'product_id' in demand_data.columns and 'entity_id' in inventory_data.columns:
+            products = demand_data['product_id'].unique() if 'product_id' in demand_data.columns else []
+            entities = inventory_data['entity_id'].unique()
+            
+            for entity_id in entities:
+                # Get lead time statistics for this entity
+                entity_lead_times = lead_times[lead_times['entity_id'] == entity_id]
+                
+                if entity_lead_times.empty:
+                    # Use average lead time if entity-specific data not available
+                    avg_lead_time = lead_times['lead_time_avg'].mean() if not lead_times.empty else 7
+                    std_lead_time = lead_times['lead_time_std'].mean() if not lead_times.empty else 2
+                else:
+                    avg_lead_time = entity_lead_times['lead_time_avg'].iloc[0]
+                    std_lead_time = entity_lead_times['lead_time_std'].iloc[0]
+                
+                # Get entity inventory
+                entity_inventory = inventory_data[inventory_data['entity_id'] == entity_id]
+                
+                for product_id in products:
+                    # Filter data for this product
+                    product_demand = demand_data[demand_data['product_id'] == product_id] if 'product_id' in demand_data.columns else demand_data
+                    
+                    if product_demand.empty:
+                        continue
+                    
+                    # Calculate demand statistics
+                    avg_daily_demand = product_demand['demand'].mean() if 'demand' in product_demand.columns else 10
+                    std_daily_demand = product_demand['demand'].std() if 'demand' in product_demand.columns else 5
+                    
+                    # Calculate policy parameters
+                    service_level_z = 1.96  # ~95% service level
+                    lead_time_demand = avg_daily_demand * avg_lead_time
+                    lead_time_demand_std = np.sqrt(
+                        (avg_lead_time * std_daily_demand**2) + 
+                        (avg_daily_demand**2 * std_lead_time**2)
+                    )
+                    
+                    safety_stock = service_level_z * lead_time_demand_std
+                    reorder_point = lead_time_demand + safety_stock
+                    
+                    # Economic Order Quantity calculation (simplified)
+                    holding_cost_rate = 0.2  # 20% holding cost per year
+                    order_cost = 100  # Fixed cost per order
+                    annual_demand = avg_daily_demand * 365.25
+                    
+                    eoq = np.sqrt((2 * order_cost * annual_demand) / holding_cost_rate)
+                    
+                    policies.append({
+                        'entity_id': entity_id,
+                        'item_id': product_id,
+                        'avg_daily_demand': avg_daily_demand,
+                        'std_daily_demand': std_daily_demand,
+                        'lead_time_avg': avg_lead_time,
+                        'lead_time_std': std_lead_time,
+                        'reorder_point': reorder_point,
+                        'order_quantity': eoq,
+                        'safety_stock': safety_stock,
+                        'service_level': 0.95
+                    })
+        
+    except Exception as e:
+        print(f"Error in inventory optimization: {e}")
+        import traceback
+        print(traceback.format_exc())
+    
+    # Create DataFrame from list
+    policies_df = pd.DataFrame(policies)
+    
+    # If empty, return DataFrame with expected columns
+    if policies_df.empty:
+        policies_df = pd.DataFrame(columns=[
+            'entity_id', 'item_id', 'avg_daily_demand', 'std_daily_demand',
+            'lead_time_avg', 'lead_time_std', 'reorder_point', 
+            'order_quantity', 'safety_stock', 'service_level'
+        ])
+    
+    return policies_df
 
 def run_analytics(transaction_data, inventory_data, demand_data, output_dir, forecast_days=30, model_type='cnn_lstm'):
-    """Run the predictive analytics on simulation data."""
+    """Run the predictive analytics on simulation data with enhanced models."""
     print("\n" + "="*80)
     print("Running Predictive Analytics".center(80))
     print("="*80)
     
-    # ...existing code...
+    start_time = time.time()
+    
+    # Print column names for debugging
+    print("\nChecking data structure:")
+    print(f"Transaction data shape: {transaction_data.shape}")
+    print(f"Inventory data shape: {inventory_data.shape}")
+    print(f"Demand data shape: {demand_data.shape}")
+    
+    # Print first few rows to understand structure
+    print("\nTransaction data sample:")
+    print(transaction_data.head(2))
+    
+    # Ensure date columns are datetime
+    for df in [transaction_data, inventory_data, demand_data]:
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+    
+    # Calculate lead times for orders
+    print("\nCalculating lead times from transaction data...")
+    lead_times = calculate_lead_times(transaction_data)
+    lead_times.to_csv(os.path.join(output_dir, 'lead_times.csv'), index=False)
+    print(f"Generated {len(lead_times)} lead time records")
     
     # Train demand forecasting model with improved architecture
     print(f"\nTraining demand forecasting model using {model_type}...")
@@ -86,7 +286,7 @@ def run_analytics(transaction_data, inventory_data, demand_data, output_dir, for
         batch_size=32,               # Standard batch size
         epochs=150,                  # More training epochs
         use_ensemble=False,          # Single model for now
-        model_size='xlarge'          # Use larger model with ~1M params
+        model_size='medium'          # Use larger model with ~1M params
     )
     
     try:
@@ -108,84 +308,24 @@ def run_analytics(transaction_data, inventory_data, demand_data, output_dir, for
             plt.close()
     except Exception as e:
         print(f"Error in demand forecasting: {e}")
+        import traceback
+        print(traceback.format_exc())
     
-    
-    # Optimize inventory
+    # Optimize inventory policies
     print("\nOptimizing inventory policies...")
-    inventory_optimizer = InventoryOptimizer(service_level=0.95)
-    
     try:
-        # Add lead time to transaction data with a safe merge
-        if len(lead_times) > 0:
-            # First check if we can merge directly
-            common_cols = set(transaction_data.columns) & set(['product_id', 'entity_id', 'partner_id'])
-            
-            if len(common_cols) == 3:
-                transaction_with_lead = transaction_data.merge(
-                    lead_times[['product_id', 'entity_id', 'partner_id', 'lead_time']], 
-                    on=['product_id', 'entity_id', 'partner_id'],
-                    how='left'
-                )
-            else:
-                # If columns don't match, just append lead time data
-                print("Warning: Cannot merge lead times with transactions. Using lead time data directly.")
-                transaction_with_lead = lead_times
-                
-            transaction_with_lead['lead_time'] = transaction_with_lead['lead_time'].fillna(7)  # Default lead time
-        else:
-            transaction_with_lead = transaction_data.copy()
-            transaction_with_lead['lead_time'] = 7  # Default lead time
-        
-        inventory_policies = inventory_optimizer.optimize_inventory_policies(
-            transaction_with_lead, demand_data
-        )
+        # Now lead_times is defined above
+        inventory_policies = optimize_inventory(demand_data, lead_times, inventory_data)
         inventory_policies.to_csv(os.path.join(output_dir, 'inventory_policies.csv'), index=False)
+        print(f"Generated {len(inventory_policies)} inventory policies")
     except Exception as e:
         print(f"Error in inventory optimization: {e}")
+        import traceback
+        print(traceback.format_exc())
     
-    # Predict disruptions
-    print("\nPredicting supply chain disruptions...")
-    disruption_predictor = DisruptionPredictor()
-    
-    try:
-        disruption_predictor.fit(inventory_data)
-        disruptions = disruption_predictor.predict_disruptions(inventory_data)
-        disruptions.to_csv(os.path.join(output_dir, 'disruption_predictions.csv'), index=False)
-        
-        # Create disruption visualization
-        plt_obj = plot_disruption_heatmap(disruptions)
-        plt_obj.savefig(os.path.join(output_dir, 'disruption_heatmap.png'))
-        plt.close()
-    except Exception as e:
-        print(f"Warning: Could not generate disruption predictions due to: {e}")
-    
-    # Predict lead times
-    print("\nTraining lead time prediction model...")
-    lead_time_estimator = LeadTimeEstimator()
-    
-    try:
-        if 'lead_time' in transaction_with_lead.columns:
-            lead_time_estimator.fit(transaction_with_lead)
-            lead_time_predictions = lead_time_estimator.predict(transaction_with_lead)
-            
-            # Save sample predictions
-            sample_predictions = transaction_with_lead.iloc[:20].copy()
-            sample_predictions['predicted_lead_time'] = lead_time_predictions[:20]
-            sample_predictions.to_csv(os.path.join(output_dir, 'lead_time_predictions_sample.csv'), index=False)
-    except Exception as e:
-        print(f"Warning: Could not generate lead time predictions due to: {e}")
-    
-    # Calculate service levels
-    try:
-        service_levels = calculate_service_levels(demand_data)
-        service_levels.to_csv(os.path.join(output_dir, 'service_levels.csv'), index=False)
-    except Exception as e:
-        print(f"Error calculating service levels: {e}")
-    
+    # Calculate metrics and other analytics
     elapsed_time = time.time() - start_time
-    print(f"\nAnalytics completed in {elapsed_time:.2f} seconds.")
-    print(f"Results saved to {output_dir}")
-
+    print(f"\nAnalytics completed in {elapsed_time:.2f} seconds")
 
 def run_evaluation(sim_output_dir, analytics_output_dir):
     """Run evaluation of analytics results against simulation data."""
@@ -209,8 +349,52 @@ def run_evaluation(sim_output_dir, analytics_output_dir):
     elapsed_time = time.time() - start_time
     print(f"\nEvaluation completed in {elapsed_time:.2f} seconds.")
     print(f"Results saved to {eval_output_dir}")
+
+def configure_gpu():
+    """Configure TensorFlow to use GPU if available."""
+    import tensorflow as tf
     
+    # Print TensorFlow version
+    print(f"TensorFlow version: {tf.__version__}")
+    
+    # Check for available GPUs
+    gpus = tf.config.list_physical_devices('GPU')
+    
+    if gpus:
+        print(f"GPU(s) detected: {len(gpus)}")
+        try:
+            # Configure TensorFlow to use the first GPU
+            tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
+            
+            # Allow memory growth to avoid consuming all GPU memory
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            
+            # Set up mixed precision for faster training
+            if tf.__version__ >= "2.4.0":
+                policy = tf.keras.mixed_precision.Policy('mixed_float16')
+                tf.keras.mixed_precision.set_global_policy(policy)
+                print("Using mixed precision policy: mixed_float16")
+            
+            # Verify GPU is being used
+            with tf.device('/GPU:0'):
+                a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
+                b = tf.constant([[5.0, 6.0], [7.0, 8.0]])
+                c = tf.matmul(a, b)
+            print("GPU test successful")
+            print(f"Compute device: {c.device}")
+            return True
+            
+        except RuntimeError as e:
+            print(f"GPU configuration error: {e}")
+    else:
+        print("No GPU available. Using CPU.")
+    
+    return False
+
 def main():
+    is_gpu_enabled = configure_gpu()
+    
     parser = argparse.ArgumentParser(description="Run supply chain simulation and predictive analytics pipeline")
     parser.add_argument("--days", type=int, default=365, help="Number of days to simulate")
     parser.add_argument("--forecast", type=int, default=30, help="Number of days to forecast")

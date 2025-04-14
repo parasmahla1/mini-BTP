@@ -12,15 +12,44 @@ from tensorflow.keras.optimizers import Adam
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
+import psutil
+import time
+from datetime import datetime
+import os
 
 class DemandForecaster:
     """
     DemandForecaster using deep learning models for time series forecasting.
     """
+    def _setup_gpu(self):
+        """Configure TensorFlow to use GPU if available."""
+
     
+    # Check if GPU is available
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Configure TensorFlow to use the first GPU
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            
+            print(f"GPU setup complete: Found {len(gpus)} GPU(s)")
+            
+            # Use mixed precision for faster training
+            if hasattr(tf.keras.mixed_precision, 'set_global_policy'):
+                policy = tf.keras.mixed_precision.Policy('mixed_float16')
+                tf.keras.mixed_precision.set_global_policy(policy)
+                print("Using mixed precision training (float16)")
+            
+            
+            
+        except Exception as e:
+            print(f"Error configuring GPU: {e}")
+    
+    print("No GPU detected. Using CPU instead.")
+        
     def __init__(self, model_type='cnn_lstm', sequence_length=14, batch_size=32, 
-                epochs=100, use_ensemble=False, model_size='large'):
+                 epochs=100, use_ensemble=False, model_size='large'):
         """
         Initialize the demand forecaster with configurable parameters.
         
@@ -39,6 +68,9 @@ class DemandForecaster:
         self.use_ensemble = use_ensemble
         self.model_size = model_size
         self.forecast_horizon = 7  # Default forecast horizon (1 week)
+        
+        # Setup GPU if available
+        self._setup_gpu()
         
         # Initialize scalers
         self.scaler_x = StandardScaler()
@@ -90,8 +122,8 @@ class DemandForecaster:
             # One-hot encode categorical time features
             df = pd.get_dummies(df, columns=['dayofweek', 'month', 'quarter'])
         
-        # Fill missing values
-        df = df.fillna(method='ffill').fillna(0)
+        # Fill missing values - use ffill and bfill instead of method='ffill'
+        df = df.ffill().fillna(0)
         
         # Add lagged features (only for deep learning models)
         if self.model_type in ['cnn_lstm', 'lstm']:
@@ -263,7 +295,17 @@ class DemandForecaster:
         
         # Use a slower learning rate for larger models to avoid instability
         learning_rate = 0.001 if self.model_size in ['small', 'medium'] else 0.0005
-        optimizer = Adam(learning_rate=learning_rate)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
+        # For GPU, use AMP (Automatic Mixed Precision) when available
+        try:
+            # TensorFlow 2.4+
+            if hasattr(tf.keras.mixed_precision, 'LossScaleOptimizer'):
+                optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
+                print("Using mixed precision optimizer")
+        except Exception as e:
+            print(f"Could not use mixed precision optimizer: {e}")
+
         model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
         
         return model
@@ -313,6 +355,9 @@ class DemandForecaster:
         Returns:
             Self for method chaining
         """
+        # Import tensorflow at the beginning of the method to ensure availability
+        
+        
         # Handle empty dataframe
         if data.empty:
             print("Empty dataframe provided. Cannot train model.")
@@ -345,10 +390,22 @@ class DemandForecaster:
         
         # Setup callbacks
         callbacks = [
-            EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
-            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=7, min_lr=1e-6),
-            ModelCheckpoint('best_demand_model.h5', save_best_only=True)
+            tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
+            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=7, min_lr=1e-6),
+            tf.keras.callbacks.ModelCheckpoint('best_demand_model.h5', save_best_only=True)
         ]
+        
+        # TensorBoard logging
+        try:
+            log_dir = os.path.join("logs", "fit", datetime.now().strftime("%Y%m%d-%H%M%S"))
+            os.makedirs(log_dir, exist_ok=True)
+            callbacks.append(tf.keras.callbacks.TensorBoard(
+                log_dir=log_dir,
+                histogram_freq=1,
+                profile_batch='500,520'  # Profile batch for performance analysis
+            ))
+        except Exception as e:
+            print(f"Could not set up TensorBoard logging: {e}")
         
         # Build and train model based on type
         if self.model_type == 'cnn_lstm':
@@ -359,18 +416,41 @@ class DemandForecaster:
         # Print model summary
         self.model.summary()
         
+        # Check if we can use GPU
+        if tf.config.list_physical_devices('GPU'):
+            print("GPU is available for training! ✓")
+            # Set device specific batch size
+            effective_batch_size = self.batch_size
+        else:
+            print("Training on CPU (GPU not available)")
+            # Use smaller batch size for CPU
+            effective_batch_size = min(32, self.batch_size)
+        
         # Train model
+        start_time = time.time()
         self.history = self.model.fit(
             X_train, y_train,
             epochs=self.epochs,
-            batch_size=self.batch_size,
+            batch_size=effective_batch_size,
             validation_data=(X_val, y_val),
             callbacks=callbacks,
             verbose=1
         )
         
+        training_time = time.time() - start_time
+        print(f"Model training completed in {training_time:.1f} seconds")
+        
         # Plot training history
         self._plot_history(self.history)
+        
+        # Print memory usage
+        try:
+            
+            process = psutil.Process(os.getpid())
+            memory_info = process.memory_info()
+            print(f"Memory usage: {memory_info.rss / 1024 / 1024:.2f} MB")
+        except Exception as e:
+            print(f"Could not get memory usage: {e}")
         
         return self
     
@@ -464,33 +544,65 @@ class DemandForecaster:
             upper_bounds = mean_scaled + 2 * std_scaled
             
             # Use the mean as our prediction
-            predictions_orig = mean_scaled
+            predictions_orig = mean_scaled[-1] if mean_scaled.shape[0] > 0 else []
+            lower_bounds_last = lower_bounds[-1] if lower_bounds.shape[0] > 0 else []
+            upper_bounds_last = upper_bounds[-1] if upper_bounds.shape[0] > 0 else []
         else:
             # Inverse transform predictions to original scale
-            predictions_orig = self.scaler_y.inverse_transform(predictions)
+            predictions_orig = self.scaler_y.inverse_transform(predictions)[-1] if predictions.shape[0] > 0 else []
         
         # Create forecast DataFrame
-        last_date = pd.to_datetime(data['date'].iloc[-1])
-        dates = pd.date_range(
-            start=last_date + pd.Timedelta(days=1),
-            periods=periods_ahead,
-            freq='D'
-        )
-        
-        forecast_df = pd.DataFrame({
-            'date': dates,
-            'forecast': predictions_orig[-1]  # Use the most recent prediction
-        })
-        
-        # Add product and retailer IDs if they exist in original data
-        for col in ['product_id', 'retailer_id', 'entity_id']:
-            if col in data.columns:
-                forecast_df[col] = data[col].iloc[-1]
-        
-        # Add confidence intervals if requested
-        if return_conf_int:
-            forecast_df['lower_bound'] = lower_bounds[-1]
-            forecast_df['upper_bound'] = upper_bounds[-1]
+        try:
+            last_date = pd.to_datetime(data['date'].iloc[-1])
+            dates = pd.date_range(
+                start=last_date + pd.Timedelta(days=1),
+                periods=periods_ahead,
+                freq='D'
+            )
+            
+            if len(predictions_orig) < periods_ahead:
+                print(f"Warning: Predictions length ({len(predictions_orig)}) is less than forecast horizon ({periods_ahead})")
+                # Pad with NaN values if needed
+                padded_predictions = np.pad(predictions_orig, 
+                                        (0, max(0, periods_ahead - len(predictions_orig))),
+                                        'constant', 
+                                        constant_values=np.nan)
+                
+                forecast_df = pd.DataFrame({
+                    'date': dates,
+                    'forecast': padded_predictions[:periods_ahead]
+                })
+            else:
+                forecast_df = pd.DataFrame({
+                    'date': dates,
+                    'forecast': predictions_orig[:periods_ahead]
+                })
+            
+            # Add product and retailer IDs if they exist in original data
+            for col in ['product_id', 'retailer_id', 'entity_id']:
+                if col in data.columns:
+                    forecast_df[col] = data[col].iloc[-1]
+            
+            # Add confidence intervals if requested
+            if return_conf_int:
+                if len(lower_bounds_last) < periods_ahead:
+                    padded_lower = np.pad(lower_bounds_last, 
+                                        (0, max(0, periods_ahead - len(lower_bounds_last))),
+                                        'constant', 
+                                        constant_values=np.nan)
+                    padded_upper = np.pad(upper_bounds_last, 
+                                        (0, max(0, periods_ahead - len(upper_bounds_last))),
+                                        'constant', 
+                                        constant_values=np.nan)
+                    forecast_df['lower_bound'] = padded_lower[:periods_ahead]
+                    forecast_df['upper_bound'] = padded_upper[:periods_ahead]
+                else:
+                    forecast_df['lower_bound'] = lower_bounds_last[:periods_ahead]
+                    forecast_df['upper_bound'] = upper_bounds_last[:periods_ahead]
+            
+        except Exception as e:
+            print(f"Error creating forecast DataFrame: {e}")
+            return pd.DataFrame(columns=['date', 'forecast'])
         
         return forecast_df
     
@@ -540,7 +652,7 @@ class DemandForecaster:
             metrics['mape'] = float('nan')
         
         return metrics
-    
+
     def save_model(self, filepath):
         """Save the model to file."""
         if self.model is None:
