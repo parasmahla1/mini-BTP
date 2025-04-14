@@ -48,7 +48,7 @@ class DemandForecaster:
     
     print("No GPU detected. Using CPU instead.")
         
-    def __init__(self, model_type='cnn_lstm', sequence_length=14, batch_size=32, 
+    def __init__(self, model_type='cnn_lstm', sequence_length=21, batch_size=32, 
                  epochs=100, use_ensemble=False, model_size='large'):
         """
         Initialize the demand forecaster with configurable parameters.
@@ -67,7 +67,7 @@ class DemandForecaster:
         self.epochs = epochs
         self.use_ensemble = use_ensemble
         self.model_size = model_size
-        self.forecast_horizon = 7  # Default forecast horizon (1 week)
+        self.forecast_horizon = 30  # Default forecast horizon (1 week)
         
         # Setup GPU if available
         self._setup_gpu()
@@ -294,7 +294,7 @@ class DemandForecaster:
         print(f"Total model parameters: {total_params:,}")
         
         # Use a slower learning rate for larger models to avoid instability
-        learning_rate = 0.001 if self.model_size in ['small', 'medium'] else 0.0005
+        learning_rate = 0.01 if self.model_size in ['small', 'medium'] else 0.005
         optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
         # For GPU, use AMP (Automatic Mixed Precision) when available

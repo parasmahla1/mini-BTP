@@ -284,9 +284,9 @@ def run_analytics(transaction_data, inventory_data, demand_data, output_dir, for
         model_type=model_type,
         sequence_length=21,          # Increased history window (3 weeks)
         batch_size=32,               # Standard batch size
-        epochs=150,                  # More training epochs
+        epochs=20,                  # More training epochs
         use_ensemble=False,          # Single model for now
-        model_size='medium'          # Use larger model with ~1M params
+        model_size='large'          # Use larger model with ~1M params
     )
     
     try:
@@ -302,7 +302,10 @@ def run_analytics(transaction_data, inventory_data, demand_data, output_dir, for
             print("Creating forecast visualizations...")
             product_id = demand_data['product_id'].iloc[0] if 'product_id' in demand_data.columns else None
             retailer_id = demand_data['retailer_id'].iloc[0] if 'retailer_id' in demand_data.columns else None
-            
+            print("Debug: Forecast data columns:", forecast_data.columns.tolist())
+            if 'forecasted_demand' not in forecast_data.columns and 'forecast' in forecast_data.columns:
+            # Create a copy of the column with the expected name
+                forecast_data['forecasted_demand'] = forecast_data['forecast']
             plt_obj = plot_demand_forecast(demand_data, forecast_data, product_id, retailer_id)
             plt_obj.savefig(os.path.join(output_dir, 'demand_forecast_sample.png'))
             plt.close()
